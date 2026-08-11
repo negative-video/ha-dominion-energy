@@ -508,6 +508,13 @@ async def test_async_get_config_entry_diagnostics_end_to_end(
     class StubHass:
         config = StubConfig()
 
+        @staticmethod
+        async def async_add_executor_job(func, *args):
+            """Run inline. The real diagnostics path pushes the dompower
+            version lookup to an executor because importlib.metadata touches
+            the filesystem, which Home Assistant forbids in the event loop."""
+            return func(*args)
+
     class StubEntry:
         data = fake_entry_data
         options = fake_entry_options
@@ -552,3 +559,23 @@ def test_update_interval_without_total_seconds(
         update_interval=timedelta(minutes=15),
     )
     assert result["coordinator"]["update_interval_seconds"] == 900.0
+
+
+class TestDompowerVersionIsInjectable:
+    """The dompower version must be resolvable off the event loop.
+
+    Regression for a live Home Assistant warning: importlib.metadata.version()
+    does filesystem I/O (listdir, open, read_text), and calling it inside
+    build_diagnostics ran that in the event loop every time a support dump was
+    downloaded. The async caller now resolves it in an executor and passes it
+    in; the direct lookup stays as a standalone fallback.
+    """
+
+    def test_injected_version_is_used_verbatim(self) -> None:
+        payload = _build({}, {}, None, dompower_version="9.9.9-injected")
+        assert payload["versions"]["dompower"] == "9.9.9-injected"
+
+    def test_omitted_version_still_resolves(self) -> None:
+        payload = _build({}, {}, None)
+        assert isinstance(payload["versions"]["dompower"], str)
+        assert payload["versions"]["dompower"]

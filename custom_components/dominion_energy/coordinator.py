@@ -122,6 +122,19 @@ def generation_of(interval: Any) -> float:
 # ---------------------------------------------------------------------------
 
 
+def statistics_window_is_fetchable(start_date: date, data_date: date) -> bool:
+    """Return whether ``start_date``..``data_date`` is worth asking the API for.
+
+    An inverted window is never a meaningful request, and the Dominion API
+    answers one with HTTP 400. The stale-zero heal branch in
+    ``_update_statistics`` can produce exactly that: it fetches from
+    ``last_good_date + 1 day``, which lands past the end of the window whenever
+    the last fully-populated day *is* ``data_date``. Left unguarded, that logs a
+    fetch failure every cycle for statistics that are in fact up to date.
+    """
+    return start_date <= data_date
+
+
 def resolve_statistic_id_prefix(
     *,
     account_number: str,
@@ -1639,6 +1652,15 @@ class DominionEnergyCoordinator(DataUpdateCoordinator[DominionEnergyData]):
                 BACKFILL_DAYS,
             )
             start_date = oldest_available
+
+        if not statistics_window_is_fetchable(start_date, data_date):
+            _LOGGER.debug(
+                "Statistics already up to date: computed start_date=%s is after "
+                "data_date=%s, nothing to fetch",
+                start_date,
+                data_date,
+            )
+            return True
 
         # The generation chain is continued from whatever the recorder holds
         # immediately before the window being (re)written, whichever branch

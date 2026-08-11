@@ -227,6 +227,7 @@ def build_diagnostics(
     coordinator_data: Any,
     has_statistics: Any = None,
     ha_version: Any = None,
+    dompower_version: Any = None,
 ) -> dict[str, Any]:
     """Assemble the redacted diagnostics payload.
 
@@ -319,7 +320,12 @@ def build_diagnostics(
             "has_statistics": has_statistics,
         },
         "versions": {
-            "dompower": _dompower_version(),
+            # Resolved by the caller off the event loop when one is running;
+            # importlib.metadata hits the filesystem. Falling back to a direct
+            # lookup keeps this function usable standalone (and in tests).
+            "dompower": dompower_version
+            if dompower_version is not None
+            else _dompower_version(),
             "home_assistant": ha_version,
         },
     }
@@ -346,6 +352,10 @@ async def async_get_config_entry_diagnostics(
     if prefix:
         has_statistics = await _async_has_statistics(hass, str(prefix))
 
+    # importlib.metadata reads the filesystem (listdir + open + read_text), which
+    # Home Assistant flags as a blocking call when done in the event loop.
+    dompower_version = await hass.async_add_executor_job(_dompower_version)
+
     return build_diagnostics(
         entry_data=entry.data,
         entry_options=entry.options,
@@ -361,6 +371,7 @@ async def async_get_config_entry_diagnostics(
         coordinator_data=getattr(coordinator, "data", None),
         has_statistics=has_statistics,
         ha_version=getattr(hass.config, "version", None),
+        dompower_version=dompower_version,
     )
 
 

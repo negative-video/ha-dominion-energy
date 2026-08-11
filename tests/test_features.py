@@ -158,6 +158,7 @@ def _load_coordinator() -> Any:
 coordinator = _load_coordinator()
 
 aggregate_hourly_generation = coordinator.aggregate_hourly_generation
+statistics_window_is_fetchable = coordinator.statistics_window_is_fetchable
 days_with_generation = coordinator.days_with_generation
 filter_incomplete_days_allowing_generation = (
     coordinator.filter_incomplete_days_allowing_generation
@@ -728,3 +729,31 @@ class TestDominionEnergyDataContract:
             "rate_check_discrepancy",
         ):
             assert getattr(data, field) is None, field
+
+
+class TestInvertedStatisticsWindow:
+    """A computed start_date after data_date must not reach the API.
+
+    Regression for a live warning: `Could not fetch statistics update data:
+    API error: 400`. The stale-zero heal branch sets
+    ``start_date = last_good_date + 1 day``; when the last fully-populated day
+    *is* ``data_date``, that lands one day past the end of the window. Dominion
+    answers an inverted range with HTTP 400, so the cycle warned every hour
+    instead of recognising it was already up to date.
+    """
+
+    def test_heal_branch_landing_past_data_date_is_not_fetched(self) -> None:
+        data_date = date(2026, 8, 10)
+        last_good_date = data_date  # last fully-populated day is data_date itself
+        start_date = last_good_date + timedelta(days=1)
+        assert start_date > data_date
+        assert not statistics_window_is_fetchable(start_date, data_date)
+
+    def test_normal_incremental_window_is_fetchable(self) -> None:
+        data_date = date(2026, 8, 10)
+        start_date = date(2026, 8, 8) + timedelta(days=1)
+        assert statistics_window_is_fetchable(start_date, data_date)
+
+    def test_same_day_rewrite_is_fetchable(self) -> None:
+        data_date = date(2026, 8, 10)
+        assert statistics_window_is_fetchable(data_date, data_date)
