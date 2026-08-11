@@ -6,10 +6,52 @@ requires-python = ">=3.12"
 dependencies = []
 
 [project.optional-dependencies]
+# Lightweight test dependencies. The bulk of the suite (rate maths, usage
+# aggregation, translation coverage, diagnostics redaction helpers) is plain
+# pytest over the standard library and runs with just these installed.
 dev = [
     "pytest>=8.3.0",
+    "pytest-asyncio>=0.24.0",
 ]
+# Home-Assistant-backed test dependencies, kept separate because they are
+# heavy (~575 MB) and version-locked.
+#
+# pytest-homeassistant-custom-component pins one exact homeassistant release
+# per version; 0.13.355 pins homeassistant==2026.8.1, which is this project's
+# target. That release requires Python >= 3.14.2, so the pin is marked
+# accordingly and simply resolves to nothing on older interpreters - the
+# HA-dependent tests then skip instead of failing.
+test-ha = [
+    "pytest-homeassistant-custom-component>=0.13.355; python_full_version >= '3.14.2'",
+    "dompower==0.2.2",
+]
+# Type checking. Kept out of `dev` so the fast path stays small, and resolved
+# through uv.lock so a new mypy release cannot turn CI red on its own.
+typing = [
+    "mypy>=1.13.0",
+]
+
+[tool.ruff]
+target-version = "py312"
+
+[tool.ruff.lint]
+# Selected explicitly rather than relying on Ruff's defaults, which have
+# expanded between releases. CI installs Ruff unpinned, so without this the
+# lint job can turn red on a new Ruff release with no change to this repo.
+select = ["E4", "E7", "E9", "F", "W", "I", "B", "SIM", "UP"]
+
+[tool.ruff.lint.isort]
+# Mirrors Home Assistant core's own isort configuration so the import style
+# used throughout this integration passes as-is: `homeassistant` gets its own
+# section after third-party, and plain `import x` sorts alongside `from x
+# import y` rather than being hoisted above it.
+force-sort-within-sections = true
+known-first-party = ["homeassistant"]
+combine-as-imports = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["."]
+# Required by pytest-homeassistant-custom-component: its autouse fixtures are
+# async, and in strict mode they error out every synchronous test in the suite.
+asyncio_mode = "auto"

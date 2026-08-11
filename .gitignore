@@ -21,3 +21,9 @@ dist/
 
 # OS
 .DS_Store
+
+# Personal utility data. Green Button exports embed the account number and a
+# full half-hourly record of household occupancy — never commit one.
+GreenButton*.xml
+greenbutton*.xml
+*_GreenButton*.xml
