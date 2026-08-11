@@ -22,7 +22,13 @@ from homeassistant.helpers.entity import EntityCategory
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
-from .const import CONF_ACCOUNT_NUMBER, CONF_METER_NUMBER, CONF_SERVICE_ADDRESS, DOMAIN
+from .const import (
+    CONF_ACCOUNT_NUMBER,
+    CONF_METER_NUMBER,
+    CONF_SERVICE_ADDRESS,
+    COST_MODE_SCHEDULE_1,
+    DOMAIN,
+)
 from .coordinator import (
     DominionEnergyConfigEntry,
     DominionEnergyCoordinator,
@@ -30,6 +36,7 @@ from .coordinator import (
 )
 from .rates import (
     LATEST_SCHEDULE_EFFECTIVE_DATE,
+    PeriodBill,
     days_since_schedule_change,
     get_schedule_for_date,
     is_schedule_possibly_stale,
@@ -296,6 +303,23 @@ GENERATION_SENSORS: tuple[DominionEnergySensorDescription, ...] = (
 ALL_SENSORS: tuple[DominionEnergySensorDescription, ...] = SENSORS + GENERATION_SENSORS
 
 
+def _breakdown_attributes(bill: PeriodBill) -> dict[str, Any]:
+    """Render a priced billing period as flat, readable attributes.
+
+    Flat rather than a nested dict so the more-info dialog lists the line items
+    the way a bill does, and six attributes rather than six entities because
+    nobody graphs "transmission charges" — they read it once when the total
+    surprises them.
+    """
+    attrs: dict[str, Any] = dict(bill.components())
+    attrs["breakdown_total"] = round(bill.total, 2)
+    attrs["breakdown_largest"] = bill.largest_component()
+    attrs["breakdown_basis"] = bill.schedule_name
+    attrs["breakdown_effective_date"] = bill.schedule_effective_date
+    attrs["season"] = bill.season.value
+    return attrs
+
+
 def _uses_legacy_identity(
     hass: HomeAssistant,
     entry: DominionEnergyConfigEntry,
@@ -510,5 +534,18 @@ class DominionEnergySensor(CoordinatorEntity[DominionEnergyCoordinator], SensorE
         if key == "rate_check_drift":
             attrs["estimated"] = data.rate_check_estimated
             attrs["actual"] = data.rate_check_actual
+
+        # Where the projected bill actually goes. Six components rather than
+        # six more entities: nobody puts "transmission charges" on a dashboard,
+        # but everybody wants to know why the total moved.
+        if key == "projected_period_cost" and data.projected_bill is not None:
+            attrs.update(_breakdown_attributes(data.projected_bill))
+            # The breakdown always prices the full tariff; the sensor's own
+            # state follows the configured cost mode. Say plainly whether the
+            # two are the same number, so nobody reconciles a difference that
+            # is a mode choice rather than an error.
+            attrs["breakdown_matches_state"] = (
+                self.coordinator.cost_mode == COST_MODE_SCHEDULE_1
+            )
 
         return attrs if attrs else None

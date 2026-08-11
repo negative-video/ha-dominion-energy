@@ -411,6 +411,67 @@ class TestPeriodBill:
         assert period.total == pytest.approx(interval_total, rel=1e-6)
 
 
+class TestPeriodBillComponents:
+    """The display projection behind the bill-breakdown attributes.
+
+    These keys are published as entity attributes, so renaming one silently
+    empties whatever dashboard card or template was reading it.
+    """
+
+    BILL = calculate_schedule1_period_bill(1000.0, date(2026, 7, 12), date(2026, 8, 11))
+
+    EXPECTED_KEYS = {
+        "customer_charge",
+        "distribution_charge",
+        "generation_charge",
+        "transmission_charge",
+        "rider_charges",
+        "consumption_tax",
+    }
+
+    def test_exposes_exactly_the_documented_keys(self):
+        assert set(self.BILL.components()) == self.EXPECTED_KEYS
+
+    def test_components_are_rounded_to_cents(self):
+        for key, value in self.BILL.components().items():
+            assert value == round(value, 2), f"{key} is not a whole number of cents"
+
+    def test_components_still_add_up_to_the_total(self):
+        """Rounding each line item must not visibly break the sum."""
+        assert sum(self.BILL.components().values()) == pytest.approx(
+            self.BILL.total, abs=0.03
+        )
+
+    def test_every_component_is_a_real_charge(self):
+        """A negative or absent line item would mean a mis-wired field."""
+        assert all(value >= 0 for value in self.BILL.components().values())
+        assert self.BILL.components()["generation_charge"] > 0
+
+    def test_generation_charge_is_not_solar_export(self):
+        """It maps the tariff's generation *charge*, not exported energy.
+
+        The naming collision with this integration's generation sensors is the
+        whole reason `components()` renames the field.
+        """
+        assert self.BILL.components()["generation_charge"] == pytest.approx(
+            round(self.BILL.generation, 2)
+        )
+
+    def test_largest_component_is_a_component_key(self):
+        assert self.BILL.largest_component() in self.EXPECTED_KEYS
+
+    def test_largest_component_really_is_the_largest(self):
+        components = self.BILL.components()
+        assert components[self.BILL.largest_component()] == max(components.values())
+
+    def test_a_tiny_bill_is_mostly_the_customer_charge(self):
+        """Sanity check that the pick tracks usage rather than a fixed field."""
+        small = calculate_schedule1_period_bill(
+            1.0, date(2026, 7, 12), date(2026, 8, 11)
+        )
+        assert small.largest_component() == "customer_charge"
+
+
 class TestBillDiscrepancy:
     """Tests for the estimate-vs-actual drift helper."""
 

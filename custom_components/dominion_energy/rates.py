@@ -515,6 +515,36 @@ class PeriodBill:
     schedule_name: str
     schedule_effective_date: str
 
+    def components(self) -> dict[str, float]:
+        """Return the bill's line items in dollars, rounded to cents.
+
+        Keyed for display rather than by attribute name: ``generation`` is the
+        generation *charge* here, which would otherwise read as solar export
+        next to this integration's generation sensors.
+
+        Rounding is deliberate and happens once, at the edge. The components
+        are summed from tiered rates and will not add up to a round total, so
+        rounding each one independently can leave the parts a cent off the
+        whole; that is the correct trade for figures meant to be read against
+        a paper bill.
+        """
+        return {
+            "customer_charge": round(self.customer_charge, 2),
+            "distribution_charge": round(self.distribution, 2),
+            "generation_charge": round(self.generation, 2),
+            "transmission_charge": round(self.transmission, 2),
+            "rider_charges": round(self.riders, 2),
+            "consumption_tax": round(self.consumption_tax, 2),
+        }
+
+    def largest_component(self) -> str:
+        """Return the display key of the biggest line item on the bill.
+
+        The one-glance answer to "what am I paying for?", surfaced as its own
+        attribute so a dashboard can show it without templating over the six.
+        """
+        return max(self.components().items(), key=lambda item: item[1])[0]
+
 
 def calculate_schedule1_period_bill(
     total_kwh: float,

@@ -86,6 +86,7 @@ from .green_button import (
 )
 from .rates import (
     VA_SCHEDULE_1_HISTORY,
+    PeriodBill,
     bill_discrepancy,
     calculate_schedule1_interval_cost,
     calculate_schedule1_period_bill,
@@ -382,6 +383,12 @@ class DominionEnergyData:
     projected_period_usage: float | None = None
     projected_period_cost: float | None = None
 
+    # The projected billing period priced by the Schedule 1 tariff, broken out
+    # by component. Always the full tariff regardless of the configured cost
+    # mode: it is what actually makes up a Dominion bill, and it is the only
+    # mode that can say where the money goes. See `_projected_bill()`.
+    projected_bill: PeriodBill | None = None
+
     # Our Schedule 1 estimate of the last completed bill against what Dominion
     # actually charged, so stale rate data announces itself. See rate_check().
     rate_check_estimated: float | None = None
@@ -441,6 +448,11 @@ class DominionEnergyCoordinator(DataUpdateCoordinator[DominionEnergyData]):
     def options_changed(self, options: Mapping[str, Any]) -> bool:
         """Return True if options differ from the ones used to set up this run."""
         return dict(options) != self._options_snapshot
+
+    @property
+    def cost_mode(self) -> str:
+        """Return the configured cost calculation mode."""
+        return str(self.config_entry.options.get(CONF_COST_MODE, COST_MODE_API))
 
     def _token_update_callback(self, access_token: str, refresh_token: str) -> None:
         """Handle token updates from the client."""
@@ -744,6 +756,8 @@ class DominionEnergyCoordinator(DataUpdateCoordinator[DominionEnergyData]):
                 projected_period_cost,
             ) = self._period_projection(period_intervals, bill_forecast)
 
+            projected_bill = self._projected_bill(projected_period_usage, bill_forecast)
+
             (
                 rate_check_estimated,
                 rate_check_actual,
@@ -783,6 +797,7 @@ class DominionEnergyCoordinator(DataUpdateCoordinator[DominionEnergyData]):
                 period_to_date_cost=period_to_date_cost,
                 projected_period_usage=projected_period_usage,
                 projected_period_cost=projected_period_cost,
+                projected_bill=projected_bill,
                 rate_check_estimated=rate_check_estimated,
                 rate_check_actual=rate_check_actual,
                 rate_check_discrepancy=rate_check_discrepancy,
@@ -872,6 +887,33 @@ class DominionEnergyCoordinator(DataUpdateCoordinator[DominionEnergyData]):
             self._project_period_cost(projected_usage, usage, cost, bill_forecast),
         )
 
+    @staticmethod
+    def _projected_bill(
+        projected_usage: float | None,
+        bill_forecast: BillForecast | None,
+    ) -> PeriodBill | None:
+        """Break a projected billing period into its Schedule 1 components.
+
+        Computed for every cost mode, not just `schedule_1`. The other modes
+        are deliberately crude — one blended rate, or peak/off-peak — so none
+        of them can answer "what am I actually paying for?". The tariff can,
+        and the answer is worth showing even to someone whose cost sensors are
+        driven by the derived rate off their last bill: only the split between
+        distribution, generation, riders and tax explains why a bill moves when
+        usage did not.
+
+        The caller is responsible for saying which of the two totals a
+        dashboard is looking at — see the `breakdown_basis` attribute in
+        `sensor.py`.
+        """
+        if projected_usage is None or bill_forecast is None:
+            return None
+        return calculate_schedule1_period_bill(
+            projected_usage,
+            bill_forecast.current_period_start,
+            bill_forecast.current_period_end,
+        )
+
     def _project_period_cost(
         self,
         projected_usage: float,
@@ -883,11 +925,8 @@ class DominionEnergyCoordinator(DataUpdateCoordinator[DominionEnergyData]):
         cost_mode = self.config_entry.options.get(CONF_COST_MODE, COST_MODE_API)
 
         if cost_mode == COST_MODE_SCHEDULE_1:
-            period_bill = calculate_schedule1_period_bill(
-                projected_usage,
-                bill_forecast.current_period_start,
-                bill_forecast.current_period_end,
-            )
+            period_bill = self._projected_bill(projected_usage, bill_forecast)
+            assert period_bill is not None  # both arguments are non-None here
             return round(period_bill.total, 2)
 
         if period_to_date_usage <= 0:

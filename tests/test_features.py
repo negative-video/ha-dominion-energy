@@ -169,6 +169,9 @@ project_period_usage = coordinator.project_period_usage
 rate_check = coordinator.rate_check
 resolve_statistic_id_prefix = coordinator.resolve_statistic_id_prefix
 DominionEnergyData = coordinator.DominionEnergyData
+# Bound staticmethods are callable straight off the class, so the breakdown
+# helper can be exercised without building a coordinator (which needs `hass`).
+projected_bill = coordinator.DominionEnergyCoordinator._projected_bill
 
 # rates.py is pure and imports cleanly on its own.
 _rates_dir = str(COMPONENT_DIR)
@@ -206,6 +209,14 @@ class ConsumptionOnlyInterval:
 
     timestamp: datetime
     consumption: float
+
+
+@dataclass(frozen=True)
+class _Forecast:
+    """The two fields `_projected_bill` reads off a ``BillForecast``."""
+
+    current_period_start: date
+    current_period_end: date
 
 
 def make_day(
@@ -429,6 +440,44 @@ class TestScheduleOneIsNotLinearInUsage:
         """
         rate = 0.125
         assert 600.0 * rate * 2 == pytest.approx(1200.0 * rate)
+
+
+class TestProjectedBillBreakdown:
+    """The coordinator hands the sensor a priced period, not just a total."""
+
+    FORECAST = _Forecast(*SUMMER_PERIOD)
+
+    def test_returns_a_priced_period(self) -> None:
+        bill = projected_bill(1200.0, self.FORECAST)
+        assert bill is not None
+        assert bill.total_kwh == pytest.approx(1200.0)
+
+    def test_it_prices_the_forecast_period_not_a_calendar_month(self) -> None:
+        """Season and tariff both come from the period the forecast reports."""
+        summer = projected_bill(1000.0, _Forecast(*SUMMER_PERIOD))
+        winter = projected_bill(1000.0, _Forecast(*WINTER_PERIOD))
+        assert summer is not None and winter is not None
+        assert summer.total != pytest.approx(winter.total)
+
+    def test_no_projection_yields_no_breakdown(self) -> None:
+        """Early in a period there is nothing to extrapolate from yet."""
+        assert projected_bill(None, self.FORECAST) is None
+
+    def test_no_forecast_yields_no_breakdown(self) -> None:
+        """Without period bounds there is no season and no tariff to pick."""
+        assert projected_bill(1200.0, None) is None
+
+    def test_it_agrees_with_the_schedule_1_projected_cost(self) -> None:
+        """In Schedule 1 mode the breakdown must decompose the shown state.
+
+        `_project_period_cost` rounds the same `PeriodBill` this returns, so
+        the attributes and the sensor value can never tell different stories.
+        """
+        bill = projected_bill(1200.0, self.FORECAST)
+        assert bill is not None
+        assert round(bill.total, 2) == round(
+            calculate_schedule1_period_bill(1200.0, *SUMMER_PERIOD).total, 2
+        )
 
 
 class TestRateCheck:
