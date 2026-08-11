@@ -18,6 +18,7 @@ from collections import defaultdict
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import date
+from statistics import median
 
 from .usage import UsageInterval, day_looks_complete
 
@@ -144,10 +145,103 @@ def usage_profile[IntervalT: UsageInterval](
     )
 
 
+#: Weeks of the same weekday compared against when judging a day's usage.
+COMPARISON_WEEKS = 4
+
+#: How far a day has to sit from its own weekday's median to be worth pointing
+#: at. Interval data is noisy enough that a tighter threshold would fire most
+#: weeks, and an alert that fires most weeks is one people turn off.
+UNUSUAL_DAY_THRESHOLD = 0.4
+
+#: Fewer prior same-weekdays than this and "typical" is not a claim worth
+#: making.
+MIN_COMPARISON_DAYS = 2
+
+
+@dataclass(frozen=True)
+class DayComparison:
+    """One day measured against how that weekday usually goes."""
+
+    day: date
+    total: float
+    typical: float
+    #: Signed fraction: ``0.5`` means half again as much as usual.
+    delta: float
+    compared_days: int
+    threshold: float
+
+    @property
+    def unusual(self) -> bool:
+        """Whether the day is far enough from typical to be worth flagging."""
+        return abs(self.delta) >= self.threshold
+
+    @property
+    def direction(self) -> str:
+        """Which way the day went, for a human-readable attribute."""
+        if not self.unusual:
+            return "typical"
+        return "higher" if self.delta > 0 else "lower"
+
+
+def compare_to_typical_day[IntervalT: UsageInterval](
+    intervals: Sequence[IntervalT],
+    *,
+    day: date,
+    weeks: int = COMPARISON_WEEKS,
+    threshold: float = UNUSUAL_DAY_THRESHOLD,
+    min_days: int = MIN_COMPARISON_DAYS,
+) -> DayComparison | None:
+    """Measure one day against the same weekday over the preceding weeks.
+
+    Same weekday, not a trailing average: household electricity is strongly
+    weekly, so comparing a Saturday against a window that was mostly weekdays
+    reports "unusual" every Saturday. An alert that cries wolf on a schedule
+    teaches people to ignore it.
+
+    The comparison uses the median rather than the mean so one already
+    exceptional day in the history cannot raise the bar and hide the next one.
+
+    Returns None when the day itself is missing or incomplete, or when fewer
+    than ``min_days`` comparable days sit behind it.
+    """
+    by_day = complete_days_by_date(intervals, through=day, days=weeks * 7 + 1)
+    if day not in by_day:
+        return None
+
+    history = [
+        sum(i.consumption for i in rows)
+        for other, rows in by_day.items()
+        if other != day
+        and other.weekday() == day.weekday()
+        and (day - other).days <= weeks * 7
+    ]
+    if len(history) < min_days:
+        return None
+
+    typical = median(history)
+    if typical <= 0:
+        return None
+
+    total = sum(i.consumption for i in by_day[day])
+    return DayComparison(
+        day=day,
+        total=round(total, 3),
+        typical=round(typical, 3),
+        delta=round((total - typical) / typical, 4),
+        compared_days=len(history),
+        threshold=threshold,
+    )
+
+
 __all__ = [
+    "COMPARISON_WEEKS",
+    "MIN_COMPARISON_DAYS",
     "MIN_PROFILE_DAYS",
     "PROFILE_DAYS",
+    "UNUSUAL_DAY_THRESHOLD",
+    "DayComparison",
     "UsageProfile",
+    "compare_to_typical_day",
     "complete_days_by_date",
     "hour_label",
     "usage_profile",

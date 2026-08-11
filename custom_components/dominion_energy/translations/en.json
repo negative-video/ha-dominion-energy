@@ -139,6 +139,11 @@
     }
   },
   "entity": {
+    "binary_sensor": {
+      "unusual_usage": {
+        "name": "Unusual usage"
+      }
+    },
     "sensor": {
       "latest_interval_usage": {
         "name": "Latest interval usage"

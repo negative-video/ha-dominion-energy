@@ -54,6 +54,8 @@ def _load_pure_package() -> types.ModuleType:
 insights = _load_pure_package()
 
 MIN_PROFILE_DAYS = insights.MIN_PROFILE_DAYS
+UNUSUAL_DAY_THRESHOLD = insights.UNUSUAL_DAY_THRESHOLD
+compare_to_typical_day = insights.compare_to_typical_day
 complete_days_by_date = insights.complete_days_by_date
 hour_label = insights.hour_label
 usage_profile = insights.usage_profile
@@ -257,3 +259,137 @@ class TestUsageProfile:
 
     def test_empty_input_reports_nothing(self) -> None:
         assert usage_profile([], through=LAST_DAY) is None
+
+
+class TestCompareToTypicalDay:
+    """Yesterday against how that weekday usually goes."""
+
+    # 2026-08-10 is a Monday, so the comparison days are the four Mondays
+    # before it and every other day in the window is noise.
+    MONDAY = date(2026, 8, 10)
+
+    def _weeks_of(self, *, weekday_kwh: float, other_kwh: float) -> list[FakeInterval]:
+        """Build five weeks where Mondays differ from every other day."""
+        rows: list[FakeInterval] = []
+        for offset in range(35):
+            day = self.MONDAY - timedelta(days=offset)
+            per_interval = (
+                weekday_kwh if day.weekday() == self.MONDAY.weekday() else other_kwh
+            )
+            rows.extend(make_day(day, consumption=per_interval / 48))
+        return rows
+
+    def test_a_normal_day_is_not_flagged(self) -> None:
+        rows = self._weeks_of(weekday_kwh=30.0, other_kwh=20.0)
+        comparison = compare_to_typical_day(rows, day=self.MONDAY)
+        assert comparison is not None
+        assert comparison.unusual is False
+        assert comparison.direction == "typical"
+        assert comparison.delta == pytest.approx(0.0)
+
+    def test_a_spike_is_flagged_as_higher(self) -> None:
+        rows = self._weeks_of(weekday_kwh=20.0, other_kwh=20.0)
+        rows = [r for r in rows if r.timestamp.date() != self.MONDAY]
+        rows.extend(make_day(self.MONDAY, consumption=40.0 / 48))
+
+        comparison = compare_to_typical_day(rows, day=self.MONDAY)
+        assert comparison is not None
+        assert comparison.unusual is True
+        assert comparison.direction == "higher"
+        assert comparison.delta == pytest.approx(1.0)
+
+    def test_a_dip_is_flagged_as_lower(self) -> None:
+        rows = self._weeks_of(weekday_kwh=20.0, other_kwh=20.0)
+        rows = [r for r in rows if r.timestamp.date() != self.MONDAY]
+        rows.extend(make_day(self.MONDAY, consumption=5.0 / 48))
+
+        comparison = compare_to_typical_day(rows, day=self.MONDAY)
+        assert comparison is not None
+        assert comparison.unusual is True
+        assert comparison.direction == "lower"
+        assert comparison.delta < 0
+
+    def test_it_compares_against_the_same_weekday(self) -> None:
+        """The whole point: a heavy-Monday household is not flagged weekly.
+
+        Mondays run 50% above every other day here. A trailing average would
+        put "typical" near 21 kWh and report every single Monday as unusual;
+        comparing Monday to Mondays reports none of them.
+        """
+        rows = self._weeks_of(weekday_kwh=30.0, other_kwh=20.0)
+        comparison = compare_to_typical_day(rows, day=self.MONDAY)
+        assert comparison is not None
+        assert comparison.typical == pytest.approx(30.0)
+        assert comparison.unusual is False
+
+    def test_typical_uses_a_median_not_a_mean(self) -> None:
+        """One already-exceptional Monday must not raise the bar.
+
+        Three ordinary 20 kWh Mondays and one 200 kWh outlier: the mean is
+        65 kWh and would hide a 40 kWh day, the median is 20 and catches it.
+        """
+        rows: list[FakeInterval] = []
+        for offset in range(35):
+            day = self.MONDAY - timedelta(days=offset)
+            rows.extend(make_day(day, consumption=20.0 / 48))
+        outlier = self.MONDAY - timedelta(days=7)
+        rows = [r for r in rows if r.timestamp.date() not in (outlier, self.MONDAY)]
+        rows.extend(make_day(outlier, consumption=200.0 / 48))
+        rows.extend(make_day(self.MONDAY, consumption=40.0 / 48))
+
+        comparison = compare_to_typical_day(rows, day=self.MONDAY)
+        assert comparison is not None
+        assert comparison.typical == pytest.approx(20.0)
+        assert comparison.unusual is True
+
+    def test_the_threshold_is_the_documented_one(self) -> None:
+        """Just inside and just outside the band, so the edge is pinned."""
+        for factor, expected in (
+            (1 + UNUSUAL_DAY_THRESHOLD - 0.05, False),
+            (1 + UNUSUAL_DAY_THRESHOLD + 0.05, True),
+        ):
+            rows = self._weeks_of(weekday_kwh=20.0, other_kwh=20.0)
+            rows = [r for r in rows if r.timestamp.date() != self.MONDAY]
+            rows.extend(make_day(self.MONDAY, consumption=20.0 * factor / 48))
+
+            comparison = compare_to_typical_day(rows, day=self.MONDAY)
+            assert comparison is not None
+            assert comparison.unusual is expected
+
+    def test_too_little_history_reports_nothing(self) -> None:
+        """One prior Monday is not enough to call anything typical."""
+        rows: list[FakeInterval] = []
+        for offset in range(10):
+            rows.extend(make_day(self.MONDAY - timedelta(days=offset)))
+        assert compare_to_typical_day(rows, day=self.MONDAY) is None
+
+    def test_a_missing_day_reports_nothing(self) -> None:
+        rows = self._weeks_of(weekday_kwh=20.0, other_kwh=20.0)
+        rows = [r for r in rows if r.timestamp.date() != self.MONDAY]
+        assert compare_to_typical_day(rows, day=self.MONDAY) is None
+
+    def test_an_incomplete_day_reports_nothing(self) -> None:
+        """A half-published day would look like a dramatic drop."""
+        rows = self._weeks_of(weekday_kwh=20.0, other_kwh=20.0)
+        rows = [r for r in rows if r.timestamp.date() != self.MONDAY]
+        rows.extend(make_day(self.MONDAY, count=12))
+        assert compare_to_typical_day(rows, day=self.MONDAY) is None
+
+    def test_it_reports_how_many_days_it_compared(self) -> None:
+        rows = self._weeks_of(weekday_kwh=20.0, other_kwh=20.0)
+        comparison = compare_to_typical_day(rows, day=self.MONDAY)
+        assert comparison is not None
+        assert comparison.compared_days == 4
+
+    def test_it_ignores_days_beyond_the_window(self) -> None:
+        """A tenth Monday back must not vote on this week."""
+        rows: list[FakeInterval] = []
+        for offset in range(70):
+            day = self.MONDAY - timedelta(days=offset)
+            weeks_back = offset // 7
+            per_day = 20.0 if weeks_back <= 4 else 200.0
+            rows.extend(make_day(day, consumption=per_day / 48))
+
+        comparison = compare_to_typical_day(rows, day=self.MONDAY)
+        assert comparison is not None
+        assert comparison.typical == pytest.approx(20.0)

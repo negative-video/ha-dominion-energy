@@ -24,7 +24,7 @@ from .green_button import GreenButtonError, describe_path_problem
 
 _LOGGER = logging.getLogger(__name__)
 
-PLATFORMS: list[Platform] = [Platform.SENSOR]
+PLATFORMS: list[Platform] = [Platform.BINARY_SENSOR, Platform.SENSOR]
 
 SERVICE_IMPORT_GREEN_BUTTON = "import_green_button"
 ATTR_CONFIG_ENTRY_ID = "config_entry_id"
