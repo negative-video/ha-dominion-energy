@@ -66,13 +66,38 @@ def _method_calls(class_node: ast.ClassDef, method: str) -> list[ast.Call]:
 
 
 def _step_ids(class_name: str) -> set[str]:
-    """Collect the step IDs shown by a flow class."""
+    """Collect the step IDs shown by a flow class.
+
+    Menus count: ``async_show_menu`` renders a step like any other and reads
+    the same ``title``/``description`` keys, it just lists links instead of
+    fields.
+    """
     class_node = _class_node(class_name)
     return {
         step_id
-        for call in _method_calls(class_node, "async_show_form")
+        for method in ("async_show_form", "async_show_menu")
+        for call in _method_calls(class_node, method)
         if (step_id := _keyword_string(call, "step_id")) is not None
     }
+
+
+def _menu_options(class_name: str) -> dict[str, list[str]]:
+    """Collect each menu step's list of destinations."""
+    class_node = _class_node(class_name)
+    menus: dict[str, list[str]] = {}
+    for call in _method_calls(class_node, "async_show_menu"):
+        step_id = _keyword_string(call, "step_id")
+        if step_id is None:
+            continue
+        for keyword in call.keywords:
+            if keyword.arg != "menu_options" or not isinstance(keyword.value, ast.List):
+                continue
+            menus[step_id] = [
+                element.value
+                for element in keyword.value.elts
+                if isinstance(element, ast.Constant) and isinstance(element.value, str)
+            ]
+    return menus
 
 
 def _abort_reasons(class_name: str) -> set[str]:
@@ -108,8 +133,16 @@ def _error_keys(class_name: str) -> set[str]:
 
 CONFIG_STEPS = _step_ids(CONFIG_FLOW_CLASS)
 OPTIONS_STEPS = _step_ids(OPTIONS_FLOW_CLASS)
+OPTIONS_MENUS = _menu_options(OPTIONS_FLOW_CLASS)
 CONFIG_ERRORS = _error_keys(CONFIG_FLOW_CLASS)
 CONFIG_ABORTS = _abort_reasons(CONFIG_FLOW_CLASS)
+
+#: Every (menu step, destination) pair, flattened for parametrisation.
+OPTIONS_MENU_ENTRIES = sorted(
+    (step_id, option)
+    for step_id, options in OPTIONS_MENUS.items()
+    for option in options
+)
 
 
 class TestOptionsAreNotClobbered:
@@ -199,6 +232,27 @@ def test_options_steps_translated(path: Path, step_id: str) -> None:
     assert step_id in steps, f"{path.name} is missing options.step.{step_id}"
     assert steps[step_id].get("title"), (
         f"{path.name}: options.step.{step_id} has no title"
+    )
+
+
+@pytest.mark.parametrize("path", [STRINGS_PATH, TRANSLATIONS_PATH])
+@pytest.mark.parametrize(("step_id", "option"), OPTIONS_MENU_ENTRIES)
+def test_options_menu_options_translated(path: Path, step_id: str, option: str) -> None:
+    """A menu entry with no label renders as its raw key."""
+    step = _load_json(path)["options"]["step"][step_id]
+    labels = step.get("menu_options", {})
+    assert option in labels, (
+        f"{path.name} is missing options.step.{step_id}.menu_options.{option}"
+    )
+    assert labels[option], f"{path.name}: {step_id}.menu_options.{option} is blank"
+
+
+@pytest.mark.parametrize(("step_id", "option"), OPTIONS_MENU_ENTRIES)
+def test_options_menu_leads_somewhere(step_id: str, option: str) -> None:
+    """Every menu destination must be a step the flow can actually show."""
+    assert option in OPTIONS_STEPS, (
+        f"options.step.{step_id} links to {option!r}, but no "
+        f"async_step_{option} shows a form"
     )
 
 

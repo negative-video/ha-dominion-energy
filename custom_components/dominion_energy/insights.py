@@ -15,9 +15,9 @@ memory by the time the sensors read it.
 from __future__ import annotations
 
 from collections import defaultdict
-from collections.abc import Sequence
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, datetime, timedelta
 from statistics import median
 
 from .usage import UsageInterval, day_looks_complete
@@ -145,6 +145,212 @@ def usage_profile[IntervalT: UsageInterval](
     )
 
 
+#: Length of one published interval. The Dominion API publishes half-hourly
+#: readings throughout, which is what turns a kWh reading into a power figure.
+INTERVAL_MINUTES = 30
+
+#: The overnight window the standing load is measured in, as local hours
+#: ``[start, end)``. Chosen to sit after the evening peak has finished and
+#: before any morning routine starts.
+BASELINE_START_HOUR = 0
+BASELINE_END_HOUR = 5
+
+#: Nights of history the baseline is taken across. A single night can be
+#: entirely covered by HVAC runtime; a week usually is not.
+BASELINE_NIGHTS = 7
+
+#: Below this many usable nights the baseline is not published.
+MIN_BASELINE_NIGHTS = 3
+
+#: ``hvac_action`` values that mean the system is drawing power right now.
+#: Note ``fan`` counts: an air handler is several hundred watts and is exactly
+#: the kind of load that would otherwise be mistaken for standing draw.
+HVAC_RUNNING_ACTIONS = frozenset(
+    {"heating", "cooling", "drying", "fan", "preheating", "defrosting"}
+)
+
+#: ``hvac_action`` values that mean it is not.
+HVAC_QUIET_ACTIONS = frozenset({"idle", "off"})
+
+#: States that carry no information about what the system is doing.
+UNKNOWN_STATES = frozenset({"unknown", "unavailable", ""})
+
+
+@dataclass(frozen=True)
+class TimeWindow:
+    """A half-open span of time, ``[start, end)``."""
+
+    start: datetime
+    end: datetime
+
+    def overlaps(self, start: datetime, end: datetime) -> bool:
+        """Whether this window shares any time with ``[start, end)``."""
+        return self.start < end and self.end > start
+
+
+def merge_windows(windows: Iterable[TimeWindow]) -> list[TimeWindow]:
+    """Collapse overlapping or touching windows into a minimal set.
+
+    Several thermostats run independently, so their windows interleave. Merging
+    first means the overlap test below is a scan rather than a cross product.
+    """
+    ordered = sorted(windows, key=lambda w: w.start)
+    merged: list[TimeWindow] = []
+    for window in ordered:
+        if merged and window.start <= merged[-1].end:
+            if window.end > merged[-1].end:
+                merged[-1] = TimeWindow(merged[-1].start, window.end)
+            continue
+        merged.append(window)
+    return merged
+
+
+def hvac_active_windows(
+    samples: Sequence[tuple[datetime, str | None, str | None]],
+    *,
+    until: datetime,
+) -> list[TimeWindow]:
+    """Turn one climate entity's recorded states into spans of runtime.
+
+    Each sample is ``(timestamp, state, hvac_action)`` and holds until the next
+    one, or until ``until`` for the last. Pass one entity's history at a time;
+    interleaving two entities' samples would end each one's span at the other's
+    next state change.
+
+    ``hvac_action`` is the signal that matters, not the state: a thermostat set
+    to ``cool`` is not drawing power until the compressor actually starts, and
+    treating "set to cool" as "running" would exclude the entire night for
+    anyone who leaves it on -- which is precisely the household this feature is
+    for.
+
+    Thermostats that do not report ``hvac_action`` at all fall back to the
+    state, counting anything but ``off`` as running. That is the conservative
+    reading: it can exclude time the system was merely idle, which understates
+    how much data is available, rather than quietly folding compressor runtime
+    into the standing load.
+    """
+    windows: list[TimeWindow] = []
+    for index, (timestamp, state, action) in enumerate(samples):
+        end = samples[index + 1][0] if index + 1 < len(samples) else until
+        if end <= timestamp:
+            continue
+        if _is_running(state, action):
+            windows.append(TimeWindow(timestamp, end))
+    return merge_windows(windows)
+
+
+def _is_running(state: str | None, action: str | None) -> bool:
+    """Whether a climate entity was drawing power in this state."""
+    if action is not None:
+        normalised = action.lower()
+        if normalised in HVAC_RUNNING_ACTIONS:
+            return True
+        if normalised in HVAC_QUIET_ACTIONS:
+            return False
+        # An action this version has not heard of. Treat it as running: a new
+        # HVAC mode is far more likely to draw power than not.
+        return normalised not in UNKNOWN_STATES
+
+    if state is None:
+        return False
+    normalised = state.lower()
+    if normalised in UNKNOWN_STATES:
+        return False
+    return normalised != "off"
+
+
+@dataclass(frozen=True)
+class BaselineLoad:
+    """What the house draws when nothing in particular is happening."""
+
+    #: Standing draw in watts.
+    watts: float
+    #: kWh the standing draw accounts for over a full day.
+    daily_kwh: float
+    nights: int
+    sampled_intervals: int
+    excluded_intervals: int
+    #: Whether any HVAC runtime was actually excluded, so the sensor can say
+    #: whether the number is thermostat-aware or raw.
+    hvac_filtered: bool
+    first_night: date
+    last_night: date
+
+
+def baseline_load[IntervalT: UsageInterval](
+    intervals: Sequence[IntervalT],
+    *,
+    through: date,
+    hvac_windows: Sequence[TimeWindow] = (),
+    nights: int = BASELINE_NIGHTS,
+    start_hour: int = BASELINE_START_HOUR,
+    end_hour: int = BASELINE_END_HOUR,
+    min_nights: int = MIN_BASELINE_NIGHTS,
+) -> BaselineLoad | None:
+    """Measure the household's standing draw from its quietest half-hours.
+
+    The quietest overnight interval is the closest an interval meter gets to
+    "everything that is always on": the fridge, the network gear, the standby
+    loads, the well pump's controller. It is one of the few numbers this data
+    can produce that a person can act on directly.
+
+    Two things make it trustworthy rather than merely plausible:
+
+    - **Any interval overlapping HVAC runtime is discarded.** A compressor
+      cycling through the night otherwise sets the floor, and the sensor
+      reports the air conditioner instead of the house. This is why the
+      thermostats are worth configuring.
+    - **The lowest interval of each night, then the median across nights.**
+      A single night can be fully covered by HVAC or spoilt by one odd
+      reading; the median across a week is not.
+
+    Returns None when fewer than ``min_nights`` nights have a usable interval
+    -- which on a week of continuous air conditioning is the honest answer, and
+    is why `excluded_intervals` is reported alongside.
+    """
+    per_interval = timedelta(minutes=INTERVAL_MINUTES)
+    by_day = complete_days_by_date(intervals, through=through, days=nights)
+
+    nightly_minima: list[float] = []
+    sampled = 0
+    excluded = 0
+    used_days: list[date] = []
+
+    for day, rows in by_day.items():
+        overnight = [row for row in rows if start_hour <= row.timestamp.hour < end_hour]
+        clean = []
+        for row in overnight:
+            row_end = row.timestamp + per_interval
+            if any(w.overlaps(row.timestamp, row_end) for w in hvac_windows):
+                excluded += 1
+                continue
+            clean.append(row)
+
+        if not clean:
+            continue
+        sampled += len(clean)
+        used_days.append(day)
+        nightly_minima.append(min(row.consumption for row in clean))
+
+    if len(nightly_minima) < min_nights:
+        return None
+
+    # kWh in half an hour -> kW -> W.
+    kwh_per_interval = median(nightly_minima)
+    watts = kwh_per_interval * (60 / INTERVAL_MINUTES) * 1000
+
+    return BaselineLoad(
+        watts=round(watts, 1),
+        daily_kwh=round(kwh_per_interval * (60 / INTERVAL_MINUTES) * 24, 3),
+        nights=len(nightly_minima),
+        sampled_intervals=sampled,
+        excluded_intervals=excluded,
+        hvac_filtered=excluded > 0,
+        first_night=min(used_days),
+        last_night=max(used_days),
+    )
+
+
 #: Weeks of the same weekday compared against when judging a day's usage.
 COMPARISON_WEEKS = 4
 
@@ -234,15 +440,27 @@ def compare_to_typical_day[IntervalT: UsageInterval](
 
 
 __all__ = [
+    "BASELINE_END_HOUR",
+    "BASELINE_NIGHTS",
+    "BASELINE_START_HOUR",
     "COMPARISON_WEEKS",
+    "HVAC_QUIET_ACTIONS",
+    "HVAC_RUNNING_ACTIONS",
+    "INTERVAL_MINUTES",
+    "MIN_BASELINE_NIGHTS",
     "MIN_COMPARISON_DAYS",
     "MIN_PROFILE_DAYS",
     "PROFILE_DAYS",
     "UNUSUAL_DAY_THRESHOLD",
+    "BaselineLoad",
     "DayComparison",
+    "TimeWindow",
     "UsageProfile",
+    "baseline_load",
     "compare_to_typical_day",
     "complete_days_by_date",
     "hour_label",
+    "hvac_active_windows",
+    "merge_windows",
     "usage_profile",
 ]

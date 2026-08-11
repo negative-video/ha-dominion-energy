@@ -87,6 +87,9 @@ def _placeholder_modules() -> dict[str, types.ModuleType]:
         "homeassistant": {},
         "homeassistant.components": {},
         "homeassistant.components.recorder": {"get_instance": _unused},
+        "homeassistant.components.recorder.history": {
+            "state_changes_during_period": _unused,
+        },
         "homeassistant.components.recorder.models": {
             "StatisticData": dict,
             "StatisticMeanType": _Sentinel,

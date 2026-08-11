@@ -53,11 +53,18 @@ def _load_pure_package() -> types.ModuleType:
 
 insights = _load_pure_package()
 
+BASELINE_END_HOUR = insights.BASELINE_END_HOUR
+BASELINE_NIGHTS = insights.BASELINE_NIGHTS
+MIN_BASELINE_NIGHTS = insights.MIN_BASELINE_NIGHTS
 MIN_PROFILE_DAYS = insights.MIN_PROFILE_DAYS
 UNUSUAL_DAY_THRESHOLD = insights.UNUSUAL_DAY_THRESHOLD
+TimeWindow = insights.TimeWindow
+baseline_load = insights.baseline_load
 compare_to_typical_day = insights.compare_to_typical_day
 complete_days_by_date = insights.complete_days_by_date
 hour_label = insights.hour_label
+hvac_active_windows = insights.hvac_active_windows
+merge_windows = insights.merge_windows
 usage_profile = insights.usage_profile
 
 NY = ZoneInfo("America/New_York")
@@ -393,3 +400,323 @@ class TestCompareToTypicalDay:
         comparison = compare_to_typical_day(rows, day=self.MONDAY)
         assert comparison is not None
         assert comparison.typical == pytest.approx(20.0)
+
+
+def at(day: date, hour: int, minute: int = 0) -> datetime:
+    """A local-time instant on ``day``."""
+    return datetime(day.year, day.month, day.day, hour, minute, tzinfo=NY)
+
+
+class TestMergeWindows:
+    """Several thermostats run independently; their spans interleave."""
+
+    def test_disjoint_windows_are_left_alone(self) -> None:
+        merged = merge_windows(
+            [
+                TimeWindow(at(LAST_DAY, 1), at(LAST_DAY, 2)),
+                TimeWindow(at(LAST_DAY, 3), at(LAST_DAY, 4)),
+            ]
+        )
+        assert len(merged) == 2
+
+    def test_overlapping_windows_collapse(self) -> None:
+        merged = merge_windows(
+            [
+                TimeWindow(at(LAST_DAY, 1), at(LAST_DAY, 3)),
+                TimeWindow(at(LAST_DAY, 2), at(LAST_DAY, 4)),
+            ]
+        )
+        assert merged == [TimeWindow(at(LAST_DAY, 1), at(LAST_DAY, 4))]
+
+    def test_a_contained_window_does_not_shrink_the_outer_one(self) -> None:
+        merged = merge_windows(
+            [
+                TimeWindow(at(LAST_DAY, 1), at(LAST_DAY, 5)),
+                TimeWindow(at(LAST_DAY, 2), at(LAST_DAY, 3)),
+            ]
+        )
+        assert merged == [TimeWindow(at(LAST_DAY, 1), at(LAST_DAY, 5))]
+
+    def test_input_order_does_not_matter(self) -> None:
+        windows = [
+            TimeWindow(at(LAST_DAY, 3), at(LAST_DAY, 4)),
+            TimeWindow(at(LAST_DAY, 1), at(LAST_DAY, 2)),
+        ]
+        assert merge_windows(windows) == merge_windows(reversed(windows))
+
+    def test_empty_input_is_empty_output(self) -> None:
+        assert merge_windows([]) == []
+
+
+class TestHvacActiveWindows:
+    """Turning recorded thermostat states into spans of real runtime."""
+
+    UNTIL = at(LAST_DAY, 6)
+
+    def test_a_running_action_becomes_a_window(self) -> None:
+        windows = hvac_active_windows(
+            [
+                (at(LAST_DAY, 1), "cool", "idle"),
+                (at(LAST_DAY, 2), "cool", "cooling"),
+                (at(LAST_DAY, 3), "cool", "idle"),
+            ],
+            until=self.UNTIL,
+        )
+        assert windows == [TimeWindow(at(LAST_DAY, 2), at(LAST_DAY, 3))]
+
+    def test_the_last_sample_runs_to_the_window_end(self) -> None:
+        windows = hvac_active_windows(
+            [(at(LAST_DAY, 4), "cool", "cooling")], until=self.UNTIL
+        )
+        assert windows == [TimeWindow(at(LAST_DAY, 4), self.UNTIL)]
+
+    def test_set_to_cool_but_idle_is_not_running(self) -> None:
+        """The central case: a thermostat left on cool all night.
+
+        Reading the state instead of the action would exclude the entire
+        night and leave nothing to measure -- for exactly the household this
+        feature exists to serve.
+        """
+        windows = hvac_active_windows(
+            [(at(LAST_DAY, 0), "cool", "idle")], until=self.UNTIL
+        )
+        assert windows == []
+
+    @pytest.mark.parametrize(
+        "action", ["heating", "cooling", "drying", "fan", "preheating", "defrosting"]
+    )
+    def test_every_drawing_action_counts(self, action: str) -> None:
+        windows = hvac_active_windows(
+            [(at(LAST_DAY, 1), "heat_cool", action)], until=self.UNTIL
+        )
+        assert len(windows) == 1
+
+    def test_fan_only_counts_as_running(self) -> None:
+        """An air handler is hundreds of watts, not standing load."""
+        windows = hvac_active_windows(
+            [(at(LAST_DAY, 1), "cool", "fan")], until=self.UNTIL
+        )
+        assert windows == [TimeWindow(at(LAST_DAY, 1), self.UNTIL)]
+
+    @pytest.mark.parametrize("action", ["idle", "off"])
+    def test_quiet_actions_do_not_count(self, action: str) -> None:
+        assert (
+            hvac_active_windows([(at(LAST_DAY, 1), "heat", action)], until=self.UNTIL)
+            == []
+        )
+
+    def test_a_thermostat_without_an_action_falls_back_to_its_mode(self) -> None:
+        """Conservative: excludes more time rather than hiding compressor draw."""
+        windows = hvac_active_windows(
+            [
+                (at(LAST_DAY, 1), "off", None),
+                (at(LAST_DAY, 2), "heat", None),
+            ],
+            until=self.UNTIL,
+        )
+        assert windows == [TimeWindow(at(LAST_DAY, 2), self.UNTIL)]
+
+    @pytest.mark.parametrize("state", ["unavailable", "unknown"])
+    def test_unavailable_says_nothing_about_runtime(self, state: str) -> None:
+        assert (
+            hvac_active_windows([(at(LAST_DAY, 1), state, None)], until=self.UNTIL)
+            == []
+        )
+
+    def test_an_unrecognised_action_is_assumed_to_draw_power(self) -> None:
+        """A new HVAC action is far more likely to run than to idle."""
+        windows = hvac_active_windows(
+            [(at(LAST_DAY, 1), "heat", "dehumidifying")], until=self.UNTIL
+        )
+        assert len(windows) == 1
+
+    def test_consecutive_running_samples_merge(self) -> None:
+        windows = hvac_active_windows(
+            [
+                (at(LAST_DAY, 1), "cool", "cooling"),
+                (at(LAST_DAY, 2), "cool", "fan"),
+                (at(LAST_DAY, 3), "cool", "idle"),
+            ],
+            until=self.UNTIL,
+        )
+        assert windows == [TimeWindow(at(LAST_DAY, 1), at(LAST_DAY, 3))]
+
+    def test_samples_at_or_after_the_end_are_dropped(self) -> None:
+        assert (
+            hvac_active_windows([(self.UNTIL, "cool", "cooling")], until=self.UNTIL)
+            == []
+        )
+
+
+class TestBaselineLoad:
+    """The standing draw, and the reason the thermostats matter."""
+
+    def _nights(
+        self,
+        *,
+        overnight_kwh: float,
+        daytime_kwh: float = 2.0,
+        count: int = BASELINE_NIGHTS,
+    ) -> list[FakeInterval]:
+        """Days whose overnight hours are quiet and whose days are not."""
+        rows: list[FakeInterval] = []
+        for offset in range(count):
+            day = LAST_DAY - timedelta(days=offset)
+            rows.extend(
+                make_day(
+                    day,
+                    shape={h: overnight_kwh for h in range(BASELINE_END_HOUR)},
+                    consumption=daytime_kwh,
+                )
+            )
+        return rows
+
+    def test_it_measures_the_quietest_overnight_half_hour(self) -> None:
+        """0.2 kWh in half an hour is 400 W."""
+        baseline = baseline_load(self._nights(overnight_kwh=0.2), through=LAST_DAY)
+        assert baseline is not None
+        assert baseline.watts == pytest.approx(400.0)
+
+    def test_it_reports_the_daily_energy_that_implies(self) -> None:
+        baseline = baseline_load(self._nights(overnight_kwh=0.2), through=LAST_DAY)
+        assert baseline is not None
+        assert baseline.daily_kwh == pytest.approx(9.6)
+
+    def test_daytime_usage_does_not_raise_it(self) -> None:
+        """The evening peak is exactly what the overnight window excludes."""
+        quiet = baseline_load(
+            self._nights(overnight_kwh=0.2, daytime_kwh=2.0), through=LAST_DAY
+        )
+        busy = baseline_load(
+            self._nights(overnight_kwh=0.2, daytime_kwh=9.0), through=LAST_DAY
+        )
+        assert quiet is not None and busy is not None
+        assert quiet.watts == pytest.approx(busy.watts)
+
+    def test_without_thermostats_a_running_ac_sets_the_floor(self) -> None:
+        """The failure this feature exists to fix, pinned as a contrast case."""
+        rows = self._nights(overnight_kwh=1.5)
+        baseline = baseline_load(rows, through=LAST_DAY)
+        assert baseline is not None
+        assert baseline.watts == pytest.approx(3000.0)
+        assert baseline.hvac_filtered is False
+
+    def test_excluding_hvac_runtime_uncovers_the_real_baseline(self) -> None:
+        """Same nights, but the compressor ran from midnight to 4 AM.
+
+        The remaining 4-5 AM hour is the only honest reading, and it is the
+        one the sensor should report.
+        """
+        rows: list[FakeInterval] = []
+        windows: list[TimeWindow] = []
+        for offset in range(BASELINE_NIGHTS):
+            day = LAST_DAY - timedelta(days=offset)
+            rows.extend(
+                make_day(
+                    day,
+                    shape={0: 1.5, 1: 1.5, 2: 1.5, 3: 1.5, 4: 0.2},
+                    consumption=2.0,
+                )
+            )
+            windows.append(TimeWindow(at(day, 0), at(day, 4)))
+
+        baseline = baseline_load(rows, through=LAST_DAY, hvac_windows=windows)
+        assert baseline is not None
+        assert baseline.watts == pytest.approx(400.0)
+        assert baseline.hvac_filtered is True
+        assert baseline.excluded_intervals == BASELINE_NIGHTS * 8
+
+    def test_a_partial_overlap_still_excludes_the_interval(self) -> None:
+        """A compressor running for ten minutes contaminates the whole half hour."""
+        rows: list[FakeInterval] = []
+        windows: list[TimeWindow] = []
+        for offset in range(BASELINE_NIGHTS):
+            day = LAST_DAY - timedelta(days=offset)
+            rows.extend(
+                make_day(
+                    day, shape={0: 1.5, 1: 0.2, 2: 0.2, 3: 0.2, 4: 0.2}, consumption=2.0
+                )
+            )
+            # Ten minutes inside the 00:00 interval only.
+            windows.append(TimeWindow(at(day, 0, 10), at(day, 0, 20)))
+
+        baseline = baseline_load(rows, through=LAST_DAY, hvac_windows=windows)
+        assert baseline is not None
+        assert baseline.excluded_intervals == BASELINE_NIGHTS
+        assert baseline.watts == pytest.approx(400.0)
+
+    def test_a_night_fully_covered_by_hvac_is_skipped_not_zeroed(self) -> None:
+        """Four usable nights out of seven still answers the question."""
+        rows: list[FakeInterval] = []
+        windows: list[TimeWindow] = []
+        for offset in range(BASELINE_NIGHTS):
+            day = LAST_DAY - timedelta(days=offset)
+            rows.extend(
+                make_day(day, shape={h: 0.2 for h in range(5)}, consumption=2.0)
+            )
+            if offset < 3:
+                windows.append(TimeWindow(at(day, 0), at(day, 5)))
+
+        baseline = baseline_load(rows, through=LAST_DAY, hvac_windows=windows)
+        assert baseline is not None
+        assert baseline.nights == BASELINE_NIGHTS - 3
+        assert baseline.watts == pytest.approx(400.0)
+
+    def test_every_night_covered_reports_nothing(self) -> None:
+        """A week of continuous air conditioning has no baseline to show."""
+        rows: list[FakeInterval] = []
+        windows: list[TimeWindow] = []
+        for offset in range(BASELINE_NIGHTS):
+            day = LAST_DAY - timedelta(days=offset)
+            rows.extend(make_day(day, consumption=1.5))
+            windows.append(TimeWindow(at(day, 0), at(day, 5)))
+
+        assert baseline_load(rows, through=LAST_DAY, hvac_windows=windows) is None
+
+    def test_one_odd_night_does_not_move_the_median(self) -> None:
+        rows = self._nights(overnight_kwh=0.2)
+        rows = [r for r in rows if r.timestamp.date() != LAST_DAY]
+        rows.extend(
+            make_day(LAST_DAY, shape={h: 0.01 for h in range(5)}, consumption=2.0)
+        )
+
+        baseline = baseline_load(rows, through=LAST_DAY)
+        assert baseline is not None
+        assert baseline.watts == pytest.approx(400.0)
+
+    def test_too_few_nights_reports_nothing(self) -> None:
+        rows = self._nights(overnight_kwh=0.2, count=MIN_BASELINE_NIGHTS - 1)
+        assert baseline_load(rows, through=LAST_DAY) is None
+
+    def test_the_minimum_is_exactly_min_baseline_nights(self) -> None:
+        rows = self._nights(overnight_kwh=0.2, count=MIN_BASELINE_NIGHTS)
+        assert baseline_load(rows, through=LAST_DAY) is not None
+
+    def test_it_reports_the_nights_it_used(self) -> None:
+        baseline = baseline_load(self._nights(overnight_kwh=0.2), through=LAST_DAY)
+        assert baseline is not None
+        assert baseline.last_night == LAST_DAY
+        assert baseline.first_night == LAST_DAY - timedelta(days=BASELINE_NIGHTS - 1)
+        assert baseline.sampled_intervals == BASELINE_NIGHTS * BASELINE_END_HOUR * 2
+
+    def test_incomplete_days_are_not_sampled(self) -> None:
+        """A partly published day's missing hours are not quiet hours.
+
+        Two intervals of a barely-started day would otherwise be treated as
+        that night's minimum and drag the median down.
+        """
+        rows: list[FakeInterval] = []
+        for offset in range(1, BASELINE_NIGHTS):
+            day = LAST_DAY - timedelta(days=offset)
+            rows.extend(
+                make_day(day, shape={h: 0.2 for h in range(5)}, consumption=2.0)
+            )
+        rows.extend(make_day(LAST_DAY, count=4, shape={0: 0.001}))
+
+        baseline = baseline_load(rows, through=LAST_DAY)
+        assert baseline is not None
+        assert baseline.last_night == LAST_DAY - timedelta(days=1)
+        assert baseline.watts == pytest.approx(400.0)
+
+    def test_empty_input_reports_nothing(self) -> None:
+        assert baseline_load([], through=LAST_DAY) is None

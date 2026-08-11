@@ -96,6 +96,14 @@
   "options": {
     "step": {
       "init": {
+        "title": "Dominion Energy Options",
+        "description": "Choose which settings to change.",
+        "menu_options": {
+          "cost": "Cost calculation",
+          "insights": "Usage insights"
+        }
+      },
+      "cost": {
         "title": "Cost Calculation Settings",
         "description": "Select how energy costs are calculated.",
         "data": {
@@ -103,6 +111,16 @@
         },
         "data_description": {
           "cost_mode": "How to calculate energy costs"
+        }
+      },
+      "insights": {
+        "title": "Usage Insights",
+        "description": "The always-on baseline measures what your home draws overnight when nothing in particular is running. Selecting your thermostats lets it ignore any half hour the heating or cooling was actually running, which matters if you run the air conditioning at night — without it the sensor measures your compressor rather than your house.",
+        "data": {
+          "hvac_entities": "Thermostats"
+        },
+        "data_description": {
+          "hvac_entities": "Leave empty if your heating and cooling never runs overnight. Thermostats that report an action (heating, cooling, idle) give the best result; ones that only report a mode are treated as running whenever they are not off."
         }
       },
       "fixed_rate": {
@@ -183,6 +201,9 @@
       },
       "projected_period_cost": {
         "name": "Projected billing period cost"
+      },
+      "baseline_load": {
+        "name": "Always-on baseline"
       },
       "peak_usage_hour": {
         "name": "Busiest hour"

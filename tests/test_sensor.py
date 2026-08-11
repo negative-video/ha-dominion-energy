@@ -44,6 +44,7 @@ ALLOWED_STATE_CLASSES: dict[str, set[str]] = {
         "SensorStateClass.TOTAL_INCREASING",
     },
     "SensorDeviceClass.MONETARY": {"SensorStateClass.TOTAL"},
+    "SensorDeviceClass.POWER": {"SensorStateClass.MEASUREMENT"},
     "SensorDeviceClass.DATE": set(),
 }
 

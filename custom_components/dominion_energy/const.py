@@ -24,6 +24,11 @@ CONF_COST_SIGNATURE: Final = "cost_signature"
 # `coordinator.resolve_statistic_id_prefix()` for the compatibility rule.
 CONF_STATISTIC_ID_PREFIX: Final = "statistic_id_prefix"
 
+# Climate entities whose runtime is excluded when measuring the always-on
+# baseline. Without these, a household that runs air conditioning overnight
+# measures its compressor rather than its standing load.
+CONF_HVAC_ENTITIES: Final = "hvac_entities"
+
 # Options keys for cost configuration
 CONF_COST_MODE: Final = "cost_mode"
 CONF_FIXED_RATE: Final = "fixed_rate"

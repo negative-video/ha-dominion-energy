@@ -13,7 +13,7 @@ from homeassistant.components.sensor import (
     SensorEntityDescription,
     SensorStateClass,
 )
-from homeassistant.const import PERCENTAGE, UnitOfEnergy
+from homeassistant.const import PERCENTAGE, UnitOfEnergy, UnitOfPower
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.entity import EntityCategory
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
@@ -181,6 +181,17 @@ SENSORS: tuple[DominionEnergySensorDescription, ...] = (
         state_class=SensorStateClass.TOTAL,
         suggested_display_precision=2,
         value_fn=lambda data: data.projected_period_cost,
+    ),
+    # What the house draws with nothing running. Watts rather than kWh: this
+    # is a rate, and "410 W" is the unit people compare appliances in.
+    DominionEnergySensorDescription(
+        key="baseline_load",
+        translation_key="baseline_load",
+        native_unit_of_measurement=UnitOfPower.WATT,
+        device_class=SensorDeviceClass.POWER,
+        state_class=SensorStateClass.MEASUREMENT,
+        suggested_display_precision=0,
+        value_fn=lambda data: data.baseline.watts if data.baseline else None,
     ),
     # When the house actually uses its electricity. The state is the hour
     # spelled the way a person says it ("6 PM") rather than 0-23, because the
@@ -432,6 +443,29 @@ class DominionEnergySensor(DominionEnergyEntity, SensorEntity):
         if key == "rate_check_drift":
             attrs["estimated"] = data.rate_check_estimated
             attrs["actual"] = data.rate_check_actual
+
+        # What the standing draw actually costs, and how much of the day it
+        # accounts for. Both are the point of the sensor -- "410 W" means
+        # little on its own, "$37 a month, a third of everything you use" does.
+        if key == "baseline_load" and data.baseline is not None:
+            baseline = data.baseline
+            attrs["daily_kwh"] = baseline.daily_kwh
+            attrs["nights_sampled"] = baseline.nights
+            attrs["intervals_sampled"] = baseline.sampled_intervals
+            attrs["intervals_excluded_hvac"] = baseline.excluded_intervals
+            attrs["hvac_filtered"] = baseline.hvac_filtered
+            attrs["first_night"] = baseline.first_night.isoformat()
+            attrs["last_night"] = baseline.last_night.isoformat()
+
+            rate = data.bill_forecast.derived_rate if data.bill_forecast else None
+            if rate:
+                attrs["estimated_monthly_cost"] = round(
+                    baseline.daily_kwh * 30 * rate, 2
+                )
+            if data.profile and data.profile.average_daily_kwh > 0:
+                attrs["share_of_daily_usage_percent"] = round(
+                    baseline.daily_kwh / data.profile.average_daily_kwh * 100, 1
+                )
 
         # The shape behind the headline hour. `hourly_average_kwh` is a plain
         # 24-element list indexed by hour so a chart card can read it directly.

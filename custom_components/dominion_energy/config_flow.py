@@ -31,6 +31,7 @@ from homeassistant.config_entries import (
     OptionsFlow,
 )
 from homeassistant.core import callback
+from homeassistant.helpers import selector
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
 from .const import (
@@ -39,6 +40,7 @@ from .const import (
     CONF_COOKIES,
     CONF_COST_MODE,
     CONF_FIXED_RATE,
+    CONF_HVAC_ENTITIES,
     CONF_METER_NUMBER,
     CONF_OFF_PEAK_RATE,
     CONF_PASSWORD,
@@ -673,7 +675,41 @@ class DominionEnergyOptionsFlow(OptionsFlow):
     async def async_step_init(
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
-        """Step 1: Select cost calculation mode."""
+        """Choose which group of settings to edit."""
+        return self.async_show_menu(step_id="init", menu_options=["cost", "insights"])
+
+    async def async_step_insights(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Configure the derived insight sensors."""
+        if user_input is not None:
+            return self._save({CONF_HVAC_ENTITIES: user_input[CONF_HVAC_ENTITIES]})
+
+        current = self._config_entry.options.get(CONF_HVAC_ENTITIES, [])
+
+        return self.async_show_form(
+            step_id="insights",
+            data_schema=vol.Schema(
+                {
+                    # The domain is spelled out rather than imported from
+                    # homeassistant.components.climate: this integration does
+                    # not depend on that component and should not start
+                    # loading it just to read one constant.
+                    vol.Optional(CONF_HVAC_ENTITIES, default=current): (
+                        selector.EntitySelector(
+                            selector.EntitySelectorConfig(
+                                domain="climate", multiple=True
+                            )
+                        )
+                    ),
+                }
+            ),
+        )
+
+    async def async_step_cost(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Select cost calculation mode."""
         if user_input is not None:
             self._selected_mode = user_input[CONF_COST_MODE]
 
@@ -690,7 +726,7 @@ class DominionEnergyOptionsFlow(OptionsFlow):
         current_options = self._config_entry.options
 
         return self.async_show_form(
-            step_id="init",
+            step_id="cost",
             data_schema=vol.Schema(
                 {
                     vol.Required(
