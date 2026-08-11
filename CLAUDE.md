@@ -18,6 +18,8 @@ Home Assistant custom integration (domain `dominion_energy`) for monitoring Domi
 
 - **`coordinator.py`**: `DominionEnergyCoordinator` extends `DataUpdateCoordinator`, polling every `UPDATE_INTERVAL_MINUTES` (60). Fetches the bill forecast, then one interval window wide enough to cover both the calendar month and the billing period, sliced locally; calculates costs; and writes external statistics. A per-day cache (`_cached_data_date`) short-circuits repeat cycles once the day's data is complete and its statistics have settled, so a normal day costs ~4 API calls rather than one set per cycle. Also owns auto-reauth (`_async_attempt_reauth`, using stored credentials and cookies) and token persistence via `_token_update_callback`.
 
+- **`green_button.py`**: Pure ESPI/Green Button parsing and timestamp correction, **no Home Assistant imports**. Dominion stamps every reading in an export with whichever UTC offset was in effect *at export time* rather than the one that applied to the reading, so roughly half of any export is an hour out — two exports of the same account taken in different seasons agreed on only 54.6% of shared hours raw, and 100% after correction. `realign_to_local()` recovers the intended wall clock and re-localises with real DST rules; `best_hour_shift()` verifies that against known-good API data. **Never skip that verification** — writing history an hour skewed is worse than not importing.
+
 - **`usage.py`**: Pure helpers with **no Home Assistant imports** — interval filtering, hourly aggregation, UTC de-duplication, cumulative-sum building, and billing-period boundary maths. This is where testable logic belongs: `coordinator.py` cannot be imported without Home Assistant, so anything decidable should live here (or as a module-level helper in `coordinator.py`) rather than inside a method.
 
 - **`rates.py`**: Full Virginia Residential Schedule 1 tariff (`VA_SCHEDULE_1`) plus the calculation engine — seasonal tiered distribution/generation rates, flat riders, transmission, and tiered consumption tax. `calculate_schedule1_interval_cost()` prices a single interval given cumulative kWh so far in the billing period.
@@ -74,6 +76,10 @@ Sharp edges already handled — do not regress them:
 - **`dompower`**: Python library for the Dominion Energy API. Pinned in `manifest.json`; keep it in sync with the API surface used here.
 - `recorder` is a Home Assistant dependency (external statistics).
 
+### Services
+
+`dominion_energy.import_green_button` (see `services.yaml`) imports Green Button XML as statistics history, extending the Energy Dashboard past the API's ~68 day ceiling to roughly 13 months. It writes into the same statistic IDs and recomputes the whole cumulative sum chain, so the series stays continuous. Adding a service means adding its strings to **both** `strings.json` and `translations/en.json` under `services:`.
+
 ## Development Notes
 
 ### Home Assistant Integration Patterns Used
@@ -94,6 +100,7 @@ Sharp edges already handled — do not regress them:
 - `tests/test_sensor.py` — translation-key coverage in both directions, entity naming, device/state class legality, unique-ID scheme.
 - `tests/test_diagnostics.py` — redaction. Treat this as security-relevant: it asserts no fake credential appears anywhere in the output.
 - `tests/test_translations.py` — `translations/en.json` exists, matches `strings.json`, and covers every step, error, and abort reason parsed out of `config_flow.py`.
+- `tests/test_green_button.py` — ESPI parsing and the timestamp realignment. Fixtures are generated in-process and reproduce Dominion's fixed-offset defect deliberately; a real export embeds an account number and a full hourly record of household occupancy and **must never enter the repository** (`.gitignore` covers `GreenButton*.xml`).
 
 Two CI test jobs: `test` (Python 3.12/3.13, `dev` extra only) enforces that the suite stays runnable without Home Assistant, and `test-ha` (Python 3.14, `test-ha` extra) runs it against the pinned HA release. `pytest-homeassistant-custom-component` pins one exact HA version and needs Python >= 3.14.2, which is why it is an optional extra rather than a base dependency. Keep new tests importable without `homeassistant` — files that need it follow the loader pattern in `test_diagnostics.py`.
 

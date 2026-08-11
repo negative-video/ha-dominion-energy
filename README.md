@@ -32,6 +32,7 @@
   - **Schedule 1 - VA Residential**: Full Dominion Energy Virginia residential tariff — tiered distribution and generation rates, seasonal pricing, riders, and consumption taxes
 - Full Energy Dashboard compatibility
 - Automatic token refresh and re-login
+- Green Button import, extending Energy Dashboard history from ~68 days to ~13 months
 - Downloadable diagnostics, with account and address details redacted
 
 ## Requirements
@@ -154,6 +155,40 @@ To add generation to the Energy Dashboard, use **Add solar production** rather t
 - Days that are missing or only partly published are skipped rather than recorded as zeros, and are picked up once the data lands
 - Cost is calculated using your configured cost mode (API estimate, fixed rate, time-of-use, or Schedule 1)
 - Statistics update daily with the previous day's data
+
+## Importing history with Green Button
+
+The Dominion API only serves about **68 days** of interval data — it ignores the date range you ask for and returns a fixed recent window, so no amount of patience gets you more. The **Green Button** download in your billing profile is a different data path covering roughly **13 rolling months**, and this integration can import it.
+
+### Getting the file
+
+Download the hourly Green Button XML from your Dominion Energy billing profile, and put it somewhere Home Assistant is allowed to read — `/config/` or a directory in `allowlist_external_dirs`. The window rolls forward, so a fresh export always reaches yesterday; keeping an old one lets you cover more history than either file alone.
+
+### Running the import
+
+Call `dominion_energy.import_green_button` from **Developer Tools → Actions**. **Do a dry run first** — it reports the date range, the total, and the timestamp-alignment result without writing anything:
+
+```yaml
+action: dominion_energy.import_green_button
+data:
+  config_entry_id: <your entry>
+  file_path:
+    - /config/green_button/GreenButton_hourly_latest.xml
+    - /config/green_button/GreenButton_hourly_older.xml
+  dry_run: true
+```
+
+Pass several files to merge them; later ones win on any hour they share. Drop `dry_run` to write the statistics.
+
+### What it does, and why it isn't a straight copy
+
+**Dominion's timestamps can't be taken at face value.** Every reading in an export is stamped with whichever UTC offset was in effect *when you clicked export*, not the offset that applied to the reading. Two exports of the same account taken in different seasons place the same hour an hour apart. The importer recovers the intended wall-clock time and re-localises it with real DST rules, then **verifies the result against the API's own readings** for the window they share. If they don't line up it refuses the import rather than writing history that is silently an hour skewed.
+
+**The API wins where both cover an hour.** Green Button is whole-kWh and hourly; the API is two decimal places and half-hourly. Green Button only fills in what the API cannot reach.
+
+**Trailing days are dropped.** The export pads out to the moment of download with zero readings, so the last day or two isn't real data.
+
+**Cost has limits.** Green Button carries no usable cost — Dominion emits the field and leaves it zero — so cost is recomputed from your configured mode. In Schedule 1 mode, hours before the oldest tariff in `rates.py` are imported as **consumption only**, rather than being priced with rates that were not yet in effect. The flat modes have no such limit.
 
 ### Why External Statistics?
 

@@ -1,0 +1,17 @@
+import_green_button:
+  fields:
+    config_entry_id:
+      required: true
+      selector:
+        config_entry:
+          integration: dominion_energy
+    file_path:
+      required: true
+      example: /config/green_button/GreenButton_hourly.xml
+      selector:
+        text:
+          multiple: true
+    dry_run:
+      default: false
+      selector:
+        boolean:

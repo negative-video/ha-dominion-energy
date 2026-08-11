@@ -100,7 +100,8 @@ def _placeholder_modules() -> dict[str, types.ModuleType]:
         "homeassistant.const": {"UnitOfEnergy": _Sentinel},
         "homeassistant.core": {"HomeAssistant": object},
         "homeassistant.exceptions": {
-            "ConfigEntryAuthFailed": type("ConfigEntryAuthFailed", (Exception,), {})
+            "ConfigEntryAuthFailed": type("ConfigEntryAuthFailed", (Exception,), {}),
+            "HomeAssistantError": type("HomeAssistantError", (Exception,), {}),
         },
         "homeassistant.helpers": {},
         "homeassistant.helpers.aiohttp_client": {"async_get_clientsession": _unused},

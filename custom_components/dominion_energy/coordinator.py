@@ -35,7 +35,7 @@ from homeassistant.components.recorder.statistics import (
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import UnitOfEnergy
 from homeassistant.core import HomeAssistant
-from homeassistant.exceptions import ConfigEntryAuthFailed
+from homeassistant.exceptions import ConfigEntryAuthFailed, HomeAssistantError
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.update_coordinator import (
     DataUpdateCoordinator,
@@ -71,7 +71,18 @@ from .const import (
     DOMAIN,
     UPDATE_INTERVAL_MINUTES,
 )
+from .green_button import (
+    GreenButtonExport,
+    best_hour_shift,
+    drop_incomplete_tail,
+    export_offset_hours,
+    merge_preferring,
+    parse_export,
+    realign_to_local,
+    to_hourly,
+)
 from .rates import (
+    VA_SCHEDULE_1_HISTORY,
     bill_discrepancy,
     calculate_schedule1_interval_cost,
     calculate_schedule1_period_bill,
@@ -120,6 +131,42 @@ def generation_of(interval: Any) -> float:
 # needs the recorder, the config entry or the API client stays on the
 # coordinator itself.
 # ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class _ImportedInterval:
+    """Stand-in satisfying `UsageInterval` for a costed Green Button hour.
+
+    The cost helpers are written against `dompower.IntervalUsageData`, but an
+    imported hour has no such object behind it. Only `timestamp` and
+    `consumption` are ever read.
+    """
+
+    timestamp: datetime
+    consumption: float
+
+
+def _load_green_button_files(
+    file_paths: list[str],
+) -> list[tuple[str, GreenButtonExport]]:
+    """Read and parse Green Button exports. Runs in an executor: file I/O."""
+    parsed: list[tuple[str, GreenButtonExport]] = []
+    for path in file_paths:
+        with open(path, "rb") as handle:
+            parsed.append((path, parse_export(handle.read())))
+    return parsed
+
+
+def _earliest_priceable_date(cost_mode: str) -> date | None:
+    """Return the earliest date this cost mode can honestly price.
+
+    Schedule 1 is bounded by the oldest tariff in the rate registry; pricing
+    earlier usage would apply rates that were not in effect. The flat modes
+    carry no such history, so they can price anything.
+    """
+    if cost_mode != COST_MODE_SCHEDULE_1:
+        return None
+    return min(schedule.effective_from for schedule in VA_SCHEDULE_1_HISTORY)
 
 
 def statistics_window_is_fetchable(start_date: date, data_date: date) -> bool:
@@ -930,7 +977,7 @@ class DominionEnergyCoordinator(DataUpdateCoordinator[DominionEnergyData]):
 
     def _calculate_interval_cost(
         self,
-        interval: IntervalUsageData,
+        interval: UsageInterval,
         bill_forecast: BillForecast | None,
         cumulative_kwh_before: float = 0.0,
         billing_period_days: int = 30,
@@ -1766,3 +1813,199 @@ class DominionEnergyCoordinator(DataUpdateCoordinator[DominionEnergyData]):
                     generation_statistics,
                 )
         return True
+
+    async def async_import_green_button(
+        self, file_paths: list[str], *, dry_run: bool = False
+    ) -> dict[str, Any]:
+        """Import Green Button exports as external statistics history.
+
+        The portal API serves only ~68 days of interval data. A Green Button
+        download from the billing profile covers roughly thirteen rolling
+        months, so importing one extends the Energy Dashboard well past what
+        polling can reach.
+
+        Dominion stamps every reading in an export with whichever UTC offset
+        was in effect when the file was generated, so about half of any export
+        is an hour out. `green_button.realign_to_local` reconstructs the
+        intended wall-clock time and re-localises it properly; the result is
+        then checked against the API's own readings for the window the two
+        share, and the import is refused if they do not line up. Writing
+        history that is silently an hour skewed would be worse than not
+        importing at all.
+
+        Where both sources cover an hour the API wins: it is half-hourly at two
+        decimal places against Green Button's whole-kWh hours.
+
+        Returns a summary describing what was (or, for a dry run, would be)
+        written.
+        """
+        assert self._client is not None
+
+        consumption_id, cost_id, _ = self._statistic_ids()
+
+        # Parsing is CPU-bound XML work over a couple of megabytes.
+        parsed = await self.hass.async_add_executor_job(
+            _load_green_button_files, file_paths
+        )
+        imported: dict[datetime, float] = {}
+        sources: list[dict[str, Any]] = []
+        for path, export in parsed:
+            offset = export_offset_hours(export.exported_at)
+            realigned = realign_to_local(export.readings, offset)
+            trimmed = drop_incomplete_tail(realigned)
+            hourly = to_hourly(trimmed)
+            # Later exports supersede earlier ones on any shared hour: the
+            # billing profile can restate a reading after a meter re-read.
+            imported.update(hourly)
+            sources.append(
+                {
+                    "path": path,
+                    "readings": len(export.readings),
+                    "assumed_utc_offset_hours": offset,
+                    "hours_after_trim": len(hourly),
+                    "first_hour": min(hourly).isoformat() if hourly else None,
+                    "last_hour": max(hourly).isoformat() if hourly else None,
+                    "total_kwh": round(sum(hourly.values()), 3),
+                }
+            )
+
+        if not imported:
+            raise HomeAssistantError(
+                "No usable readings found in the supplied Green Button export(s)"
+            )
+
+        # Reference data for the alignment check: the API window overlapping
+        # the import. This is the only data we know to be correctly stamped.
+        start_date, end_date = self._backfill_window(dt_util.now().date())
+        reference_intervals = await self._client.async_get_interval_usage(
+            account_number=self.config_entry.data[CONF_ACCOUNT_NUMBER],
+            meter_number=self.config_entry.data[CONF_METER_NUMBER],
+            start_date=start_date,
+            end_date=end_date,
+        )
+        reference_intervals, _dropped = filter_incomplete_days(reference_intervals)
+        # Only consumption matters for the alignment check, so bucket directly
+        # rather than going through aggregate_hourly and costing data twice.
+        reference_local: dict[datetime, float] = {}
+        for interval in reference_intervals:
+            hour = interval.timestamp.replace(minute=0, second=0, microsecond=0)
+            reference_local[hour] = (
+                reference_local.get(hour, 0.0) + interval.consumption
+            )
+        reference_hourly = {
+            dt_util.as_utc(hour): value for hour, value in reference_local.items()
+        }
+
+        alignment = best_hour_shift(imported, reference_hourly)
+        if alignment is None:
+            raise HomeAssistantError(
+                "Green Button export does not overlap the API's data window by "
+                "enough hours to verify its timestamps. Export a fresher file."
+            )
+        if alignment.shift_hours != 0:
+            raise HomeAssistantError(
+                f"Green Button timestamps look {alignment.shift_hours:+d}h out "
+                f"against the API over {alignment.overlapping_hours} shared "
+                "hours, so the export was not realigned correctly and the "
+                "import was refused. Please report this with the export's date."
+            )
+
+        merged = merge_preferring(reference_hourly, imported)
+        cutoff = _earliest_priceable_date(
+            self.config_entry.options.get(CONF_COST_MODE, COST_MODE_API)
+        )
+
+        summary: dict[str, Any] = {
+            "sources": sources,
+            "alignment": {
+                "shift_hours": alignment.shift_hours,
+                "compared_hours": alignment.overlapping_hours,
+                "mean_absolute_error_kwh": round(alignment.mean_absolute_error_kwh, 4),
+            },
+            "hours_imported": len(imported),
+            "hours_from_api": len(reference_hourly),
+            "hours_total": len(merged),
+            "first_hour": min(merged).isoformat(),
+            "last_hour": max(merged).isoformat(),
+            "total_kwh": round(sum(merged.values()), 3),
+            "cost_priced_from": cutoff.isoformat() if cutoff else None,
+            "statistic_ids": {"consumption": consumption_id, "cost": cost_id},
+            "dry_run": dry_run,
+        }
+
+        if dry_run:
+            return summary
+
+        consumption_rows = self._statistic_rows(merged)
+        async_add_external_statistics(
+            self.hass,
+            self._energy_metadata(consumption_id, "consumption"),
+            consumption_rows,
+        )
+
+        cost_hourly = self._price_hourly(merged, cutoff)
+        if cost_hourly:
+            async_add_external_statistics(
+                self.hass,
+                self._cost_metadata(cost_id),
+                self._statistic_rows(cost_hourly),
+            )
+        summary["cost_hours_written"] = len(cost_hourly)
+
+        _LOGGER.info(
+            "Imported %d hours of Green Button history (%s to %s, %.1f kWh)",
+            len(merged),
+            summary["first_hour"],
+            summary["last_hour"],
+            summary["total_kwh"],
+        )
+        return summary
+
+    def _price_hourly(
+        self, hourly: dict[datetime, float], cutoff: date | None
+    ) -> dict[datetime, float]:
+        """Cost each hour using the configured mode.
+
+        Hours before ``cutoff`` are skipped rather than priced with a tariff
+        that was not in effect: the rate registry only reaches back so far, and
+        `get_schedule_for_date` would otherwise fall back to its oldest
+        schedule and quietly bill 2025 at 2026 rates.
+
+        Cumulative kWh is tracked per billing period so Schedule 1's tier
+        boundary lands where the bill puts it. Billing period boundaries for
+        historical data are stepped back in whole months from the current
+        period, which drifts a few days per cycle against real meter reads.
+        """
+        local_tz = dt_util.get_default_time_zone()
+        anchor = None
+        if self.data is not None and self.data.bill_forecast is not None:
+            anchor = self.data.bill_forecast.current_period_start
+        period_days = self._billing_period_days(
+            self.data.bill_forecast if self.data else None
+        )
+
+        priced: dict[datetime, float] = {}
+        cumulative = 0.0
+        current_period: date | None = None
+
+        for hour in sorted(hourly):
+            local = hour.astimezone(local_tz)
+            if cutoff is not None and local.date() < cutoff:
+                continue
+            period = (
+                billing_period_start(local.date(), anchor)
+                if anchor is not None
+                else local.date().replace(day=1)
+            )
+            if period != current_period:
+                cumulative = 0.0
+                current_period = period
+            kwh = hourly[hour]
+            priced[hour] = self._calculate_interval_cost(
+                _ImportedInterval(timestamp=local, consumption=kwh),
+                self.data.bill_forecast if self.data else None,
+                cumulative_kwh_before=cumulative,
+                billing_period_days=period_days,
+            )
+            cumulative += kwh
+        return priced

@@ -207,5 +207,25 @@
         "name": "Current month generation"
       }
     }
+  },
+  "services": {
+    "import_green_button": {
+      "name": "Import Green Button export",
+      "description": "Imports usage history from a Green Button XML export downloaded from your Dominion Energy billing profile. The API only serves about 68 days of interval data; a Green Button export covers roughly 13 months, so this extends your Energy Dashboard history well past what polling can reach.",
+      "fields": {
+        "config_entry_id": {
+          "name": "Account",
+          "description": "The Dominion Energy account and meter to import into."
+        },
+        "file_path": {
+          "name": "File path",
+          "description": "Full path to the Green Button XML file, which must be somewhere Home Assistant is allowed to read (under your config directory, or a directory listed in allowlist_external_dirs). Supply several paths to merge multiple exports; later files win on any hour they share."
+        },
+        "dry_run": {
+          "name": "Dry run",
+          "description": "Report what would be imported without writing any statistics. Use this first to check the date range and the timestamp alignment result."
+        }
+      }
+    }
   }
 }
