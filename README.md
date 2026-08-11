@@ -22,12 +22,22 @@
 
 - 30-minute interval energy usage data
 - Daily and monthly usage totals
-- Cost estimation with multiple calculation modes:
+- Billing-period usage and cost to date, plus a projected end-of-period bill
+- Excess generation (solar / net metering) usage and statistics, when the meter reports it
+- Bill forecast sensors (last bill, current billing period, effective rate)
+- Cost estimation with four calculation modes:
   - **API Estimate**: Derives rate from your actual bill (charges / usage)
   - **Fixed Rate**: Single $/kWh rate
   - **Time-of-Use**: Peak and off-peak rates by hour
+  - **Schedule 1 - VA Residential**: Full Dominion Energy Virginia residential tariff — tiered distribution and generation rates, seasonal pricing, riders, and consumption taxes
 - Full Energy Dashboard compatibility
-- Automatic token refresh
+- Automatic token refresh and re-login
+- Downloadable diagnostics, with account and address details redacted
+
+## Requirements
+
+- Home Assistant **2025.11.0** or newer
+- A Dominion Energy account with an AMI (smart) meter
 
 ## Installation
 
@@ -59,6 +69,8 @@
 
 > **Note**: SMS-based TFA is recommended. Email TFA may have reliability issues.
 
+If you have several meters on one account, add the integration once per meter — each meter gets its own entry.
+
 ### Configure Cost Calculation (Optional)
 
 1. After setup, click "Configure" on the integration
@@ -66,22 +78,46 @@
    - **API Estimate**: Uses your actual bill rate (recommended)
    - **Fixed Rate**: Enter a single $/kWh rate
    - **Time-of-Use**: Configure peak/off-peak rates and hours
+   - **Schedule 1 - VA Residential**: Applies the full Virginia residential tariff; no extra input needed
 
 ## Sensors
 
 | Sensor | Description | State Class |
 |--------|-------------|-------------|
-| Latest Interval Usage | Most recent 30-minute reading (kWh) | measurement |
-| Yesterday's Usage | Previous day's total consumption (kWh) | total_increasing |
-| Current Month Usage | Month-to-date consumption (kWh) | total_increasing |
-| Yesterday's Cost | Estimated cost for previous day ($) | total |
-| Current Month Cost | Estimated cost for month-to-date ($) | total |
-| Current Billing Period Usage | Usage in current billing cycle (kWh) | total_increasing |
-| Last Bill Charges | Charges from previous bill ($) | total |
-| Last Bill Usage | Usage from previous bill (kWh) | total |
-| Effective Rate | Derived cost per kWh ($/kWh) | measurement |
+| Latest interval usage | Most recent 30-minute reading (kWh) | measurement |
+| Yesterday's usage | Previous day's total consumption (kWh) | total_increasing |
+| Current month usage | Month-to-date consumption (kWh) | total_increasing |
+| Yesterday's cost | Estimated cost for previous day ($) | total |
+| Current month cost | Estimated cost for month-to-date ($) | total |
+| Current billing period usage | Usage in current billing cycle, as reported by Dominion (kWh) | total_increasing |
+| Billing period usage to date | Usage since the billing period started, from interval data (kWh) | total |
+| Billing period cost to date | Cost of that usage in your configured mode ($) | total |
+| Projected billing period usage | Projected usage for the full billing period (kWh) | total |
+| Projected billing period cost | Projected cost for the full billing period ($) | total |
+| Last bill charges | Charges from previous bill ($) | total |
+| Last bill usage | Usage from previous bill (kWh) | total |
+| Effective rate | Derived cost per kWh ($/kWh) | measurement |
 
-> **Note**: The Dominion Energy API only provides data for **completed days**. Yesterday's data typically becomes available the following morning. Sensors include a `data_date` attribute showing which day the data represents.
+### Solar / net metering
+
+If your meter reports excess generation, three more sensors appear automatically — **Latest interval generation**, **Yesterday's generation**, and **Current month generation** — along with a generation statistic for the Energy Dashboard. Meters that never report export get none of these, so non-solar installations are unaffected.
+
+> **Note**: Generation is recorded as its own separate stream. It does **not** currently offset the cost figures — net-metering credits are not modelled.
+
+### Diagnostic sensors
+
+| Sensor | Description |
+|--------|-------------|
+| Billing period start | First day of the current billing period |
+| Billing period end | Last day of the current billing period |
+| Time-of-use plan | `Yes`/`No` — whether the account is billed on a time-of-use plan |
+| Estimated last bill charges | What the Schedule 1 tariff model computes for the last bill ($) |
+| Rate model drift | How far that estimate lands from the real bill (%) |
+| Rate schedule effective date | Effective date of the newest tariff data bundled with this integration |
+
+> **Tip**: **Rate model drift** is a staleness alarm. Dominion re-files its riders periodically — the fuel factor typically changes around July 1 — and this integration ships the rates hard-coded. A drift figure that suddenly grows means the bundled tariff data has fallen behind and should be refreshed. See [docs/rate-schedules.md](docs/rate-schedules.md).
+
+> **Note**: The Dominion Energy API only provides data for **completed days**. Yesterday's data typically becomes available the following morning. The daily and interval sensors carry a `data_date` attribute showing which day the data represents; the monthly sensors carry `month_start` and `month_end`.
 
 ## Energy Dashboard
 
@@ -100,15 +136,21 @@ This integration provides **external statistics** for the Home Assistant Energy 
 
 | Statistic ID | Description |
 |--------------|-------------|
-| `dominion_energy:{account}_energy_consumption` | Cumulative energy consumption (kWh) |
-| `dominion_energy:{account}_energy_cost` | Cumulative energy cost (uses configured cost mode) |
+| `dominion_energy:{prefix}_energy_consumption` | Cumulative energy consumption (kWh) |
+| `dominion_energy:{prefix}_energy_cost` | Cumulative energy cost (uses configured cost mode) |
+| `dominion_energy:{prefix}_energy_generation` | Cumulative excess generation (kWh) — only created once the meter reports export |
+
+`{prefix}` is your account number for the first meter on an account, so existing installations keep the statistic IDs and history they already have. A second meter added on the same account uses `{account}_{meter}` instead, so the two never write into the same stream.
+
+To add generation to the Energy Dashboard, use **Add solar production** rather than **Add consumption**.
 
 ### How It Works
 
 - The integration creates external statistics (not sensor entities) for the Energy Dashboard
 - Data is aggregated from 30-minute intervals into hourly statistics
-- **60 days of historical data** are automatically backfilled on first setup
-- Cost is calculated using your configured cost mode (API estimate, fixed rate, or TOU)
+- Historical data is automatically backfilled on first setup. The window is set by `BACKFILL_DAYS` in `const.py`; the API returns roughly the last two months of 30-minute data regardless of the range requested
+- Days that are missing or only partly published are skipped rather than recorded as zeros, and are picked up once the data lands
+- Cost is calculated using your configured cost mode (API estimate, fixed rate, time-of-use, or Schedule 1)
 - Statistics update daily with the previous day's data
 
 ### Why External Statistics?
@@ -122,11 +164,13 @@ The Energy Dashboard works best with cumulative statistics that track total cons
 
 ## Authentication
 
-Tokens automatically refresh in the background. If authentication fails:
+Tokens automatically refresh in the background. When they expire, the integration first tries to sign in again on its own using the credentials and session cookies saved during setup, which usually avoids another TFA prompt.
+
+If that fails (for example, Dominion asks for a new verification code):
 
 1. Home Assistant will show a notification to re-authenticate
 2. Click the notification to start the re-authentication flow
-3. Enter your username/password and complete TFA again
+3. Confirm or update your username/password and complete TFA again
 
 ## Troubleshooting
 
@@ -139,8 +183,12 @@ Tokens automatically refresh in the background. If authentication fails:
 - Use the re-authentication flow to log in again
 
 ### Missing data
-- Data may take up to 30 minutes to appear after setup
+- Data may take up to an hour to appear after setup
 - Historical data availability depends on Dominion Energy's API
+
+### Reporting a problem
+
+Download diagnostics before opening an issue: **Settings → Devices & Services → Dominion Energy → ⋮ → Download diagnostics**. Account number, meter number, service address, credentials and tokens are redacted, so the file is safe to attach to a public issue. It records the service region (for example `VA` or `SC`), which is usually the first thing needed to reproduce a fault.
 
 ## API Constants
 
