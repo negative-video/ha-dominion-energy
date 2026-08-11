@@ -59,6 +59,29 @@ def _unusual_usage_attributes(data: DominionEnergyData) -> dict[str, Any]:
     }
 
 
+def _over_budget_attributes(data: DominionEnergyData) -> dict[str, Any]:
+    """Show the projection against the target it was judged by."""
+    if data.period_budget is None:
+        return {}
+    attrs: dict[str, Any] = {
+        "budget": data.period_budget,
+        "spent_so_far": data.period_to_date_cost,
+        "projected_total": data.projected_period_cost,
+        "remaining": data.budget_remaining,
+        "percent_used": data.budget_used,
+    }
+    # How long is left to do something about it.
+    if data.bill_forecast is not None and data.data_date is not None:
+        attrs["days_left_in_period"] = max(
+            (data.bill_forecast.current_period_end - data.data_date).days, 0
+        )
+    if data.projected_period_cost is not None and data.period_budget > 0:
+        attrs["projected_over_by_percent"] = round(
+            (data.projected_period_cost / data.period_budget - 1) * 100, 1
+        )
+    return attrs
+
+
 BINARY_SENSORS: tuple[DominionEnergyBinarySensorDescription, ...] = (
     DominionEnergyBinarySensorDescription(
         key="unusual_usage",
@@ -68,6 +91,17 @@ BINARY_SENSORS: tuple[DominionEnergyBinarySensorDescription, ...] = (
             data.day_comparison.unusual if data.day_comparison else None
         ),
         attributes_fn=_unusual_usage_attributes,
+    ),
+)
+
+# Only created when a budget is configured - see async_setup_entry.
+BUDGET_BINARY_SENSORS: tuple[DominionEnergyBinarySensorDescription, ...] = (
+    DominionEnergyBinarySensorDescription(
+        key="over_budget_pace",
+        translation_key="over_budget_pace",
+        device_class=BinarySensorDeviceClass.PROBLEM,
+        value_fn=lambda data: data.over_budget_pace,
+        attributes_fn=_over_budget_attributes,
     ),
 )
 
@@ -81,13 +115,19 @@ async def async_setup_entry(
     coordinator = entry.runtime_data
     identity = resolve_identity(hass, entry)
 
+    descriptions = BINARY_SENSORS
+    # An options change reloads the entry, so a budget set later brings its
+    # entity along without needing a coordinator listener.
+    if coordinator.period_budget is not None:
+        descriptions += BUDGET_BINARY_SENSORS
+
     async_add_entities(
         DominionEnergyBinarySensor(
             coordinator=coordinator,
             description=description,
             identity=identity,
         )
-        for description in BINARY_SENSORS
+        for description in descriptions
     )
 
 

@@ -18,7 +18,7 @@ from typing import Any
 
 import pytest
 
-from tests.astkit import describe, tuple_of_calls
+from tests.astkit import describe, function, tuple_of_calls
 from tests.conftest import COMPONENT_DIR
 
 BINARY_SENSOR_PATH = COMPONENT_DIR / "binary_sensor.py"
@@ -41,7 +41,11 @@ def _names(path: Path) -> dict[str, str]:
 
 
 def _calls() -> list[ast.Call]:
-    return tuple_of_calls(BINARY_SENSOR_PATH, "BINARY_SENSORS", DESCRIPTION_CLASS)
+    return [
+        call
+        for group in ("BINARY_SENSORS", "BUDGET_BINARY_SENSORS")
+        for call in tuple_of_calls(BINARY_SENSOR_PATH, group, DESCRIPTION_CLASS)
+    ]
 
 
 BINARY_SENSORS = [
@@ -120,26 +124,71 @@ class TestKeysDoNotCollideWithSensors:
         assert not collisions, f"key used by both platforms: {collisions}"
 
 
-class TestUnknownIsNotOff:
-    """ "Off" and "not knowable yet" are different answers."""
+class TestBudgetGating:
+    """The over-budget sensor only exists once there is a budget."""
 
-    def test_value_fns_can_return_none(self) -> None:
-        """Every description's value_fn has a None branch.
-
-        A binary sensor reporting `off` before it has the data to judge tells
-        people everything is fine, which is worse than saying nothing.
-        """
-        for call in _calls():
-            value_fn = next(kw.value for kw in call.keywords if kw.arg == "value_fn")
-            source = ast.unparse(value_fn)
-            assert "None" in source or "else" in source, (
-                f"{describe(call)['key']}: value_fn cannot express 'unknown'"
+    def test_budget_sensors_are_a_separate_group(self) -> None:
+        always_on = {
+            describe(call)["key"]
+            for call in tuple_of_calls(
+                BINARY_SENSOR_PATH, "BINARY_SENSORS", DESCRIPTION_CLASS
             )
+        }
+        gated = {
+            describe(call)["key"]
+            for call in tuple_of_calls(
+                BINARY_SENSOR_PATH, "BUDGET_BINARY_SENSORS", DESCRIPTION_CLASS
+            )
+        }
+        assert gated == {"over_budget_pace"}
+        assert not gated & always_on
 
-    def test_entity_returns_none_without_coordinator_data(self) -> None:
-        source = BINARY_SENSOR_PATH.read_text(encoding="utf-8")
-        assert "if self.coordinator.data is None:" in source
-        assert "return None" in source
+    def test_setup_gates_on_a_configured_budget(self) -> None:
+        source = ast.unparse(function(BINARY_SENSOR_PATH, "async_setup_entry"))
+        assert "period_budget" in source
+        assert "BUDGET_BINARY_SENSORS" in source
+
+
+class TestUnknownIsNotOff:
+    """ "Off" and "not knowable yet" are different answers.
+
+    A PROBLEM sensor sitting at `off` states that everything is fine. Before
+    there is enough data to judge, that is a claim the integration has not
+    earned, so every path has to be able to reach `None`.
+    """
+
+    def test_the_value_fn_contract_permits_unknown(self) -> None:
+        """The declared type is what makes `None` legal for every description.
+
+        Checked on the annotation rather than by reading each lambda: a value
+        may become `None` inside a property on the data class, which no amount
+        of squinting at the lambda body would reveal.
+        """
+        description = next(
+            node
+            for node in ast.walk(ast.parse(BINARY_SENSOR_PATH.read_text("utf-8")))
+            if isinstance(node, ast.ClassDef) and node.name == DESCRIPTION_CLASS
+        )
+        annotations = {
+            node.target.id: ast.unparse(node.annotation)
+            for node in description.body
+            if isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name)
+        }
+        assert "None" in annotations["value_fn"], (
+            f"{DESCRIPTION_CLASS}.value_fn is typed {annotations['value_fn']}, "
+            "which forbids the 'not knowable yet' answer"
+        )
+
+    def test_is_on_returns_none_without_coordinator_data(self) -> None:
+        source = ast.unparse(
+            function(BINARY_SENSOR_PATH, "is_on", "DominionEnergyBinarySensor")
+        )
+        assert "if self.coordinator.data is None:\n        return None" in source
+
+    def test_is_on_is_typed_as_optional(self) -> None:
+        node = function(BINARY_SENSOR_PATH, "is_on", "DominionEnergyBinarySensor")
+        assert node.returns is not None
+        assert "None" in ast.unparse(node.returns)
 
 
 class TestDeviceClasses:

@@ -76,10 +76,11 @@ def _sensor_names(path: Path) -> dict[str, str]:
 
 
 SENSORS = [_describe(call) for call in _tuple_of_descriptions("SENSORS")]
+BUDGET_SENSORS = [_describe(call) for call in _tuple_of_descriptions("BUDGET_SENSORS")]
 GENERATION_SENSORS = [
     _describe(call) for call in _tuple_of_descriptions("GENERATION_SENSORS")
 ]
-ALL_SENSORS = SENSORS + GENERATION_SENSORS
+ALL_SENSORS = SENSORS + BUDGET_SENSORS + GENERATION_SENSORS
 ALL_KEYS = [sensor["key"] for sensor in ALL_SENSORS]
 
 
@@ -315,6 +316,32 @@ class TestRateDrift:
         assert "LATEST_SCHEDULE_EFFECTIVE_DATE" in source
 
 
+class TestBudgetGating:
+    """Most people never set a budget; they must not see empty entities."""
+
+    def test_budget_sensors_are_a_separate_group(self) -> None:
+        budget_keys = {s["key"] for s in BUDGET_SENSORS}
+        assert budget_keys == {"budget_remaining", "budget_used"}
+        assert not budget_keys & {s["key"] for s in SENSORS}
+
+    def test_they_are_gated_on_a_configured_budget(self) -> None:
+        source = ast.unparse(_function("async_setup_entry"))
+        assert "period_budget" in source
+        assert "BUDGET_SENSORS" in source
+
+    def test_no_listener_is_needed_for_the_budget(self) -> None:
+        """The budget is an option, and options changes reload the entry.
+
+        Generation needs a coordinator listener because it can appear on a
+        later refresh; a budget cannot, so a one-shot check at setup is both
+        sufficient and simpler. This pins that they are gated differently on
+        purpose.
+        """
+        source = ast.unparse(_function("async_setup_entry"))
+        budget_branch = source.split("period_budget", 1)[1].split("\n\n", 1)[0]
+        assert "async_add_listener" not in budget_branch
+
+
 class TestGenerationGating:
     """Most meters never export; their owners must not see empty entities."""
 
@@ -330,9 +357,9 @@ class TestGenerationGating:
     def test_setup_adds_the_base_sensors_unconditionally(self) -> None:
         source = ast.unparse(_function("async_setup_entry"))
         assert "for description in SENSORS" in source
-        assert source.count("async_add_entities(") == 2, (
-            "expected one unconditional add for SENSORS and one gated add for "
-            "GENERATION_SENSORS"
+        assert source.count("async_add_entities(") == 3, (
+            "expected one unconditional add for SENSORS and one gated add "
+            "each for BUDGET_SENSORS and GENERATION_SENSORS"
         )
 
     def test_generation_sensors_are_gated_on_has_generation(self) -> None:

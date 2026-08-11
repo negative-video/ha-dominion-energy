@@ -60,6 +60,7 @@ from .const import (
     CONF_PEAK_END_HOUR,
     CONF_PEAK_RATE,
     CONF_PEAK_START_HOUR,
+    CONF_PERIOD_BUDGET,
     CONF_REFRESH_TOKEN,
     CONF_STATISTIC_ID_PREFIX,
     CONF_USERNAME,
@@ -421,6 +422,37 @@ class DominionEnergyData:
     rate_check_actual: float | None = None
     rate_check_discrepancy: float | None = None
 
+    # The configured spending target for this billing period, copied onto the
+    # data each cycle so the budget sensors read it the same way every other
+    # sensor reads its value. None when no budget is set.
+    period_budget: float | None = None
+
+    @property
+    def budget_remaining(self) -> float | None:
+        """Dollars left in the period's budget; negative once overspent."""
+        if self.period_budget is None or self.period_to_date_cost is None:
+            return None
+        return round(self.period_budget - self.period_to_date_cost, 2)
+
+    @property
+    def budget_used(self) -> float | None:
+        """Percent of the budget spent so far this billing period."""
+        if not self.period_budget or self.period_to_date_cost is None:
+            return None
+        return round(self.period_to_date_cost / self.period_budget * 100, 1)
+
+    @property
+    def over_budget_pace(self) -> bool | None:
+        """Whether the period is projected to finish over budget.
+
+        Deliberately the *projection* rather than spend to date: "you have
+        used 60% of your budget" says nothing useful on day 6 of 30, whereas
+        "at this rate you will finish 20% over" does.
+        """
+        if self.period_budget is None or self.projected_period_cost is None:
+            return None
+        return self.projected_period_cost > self.period_budget
+
     @property
     def latest_usage(self) -> float | None:
         """Get the latest interval usage value."""
@@ -479,6 +511,23 @@ class DominionEnergyCoordinator(DataUpdateCoordinator[DominionEnergyData]):
     def cost_mode(self) -> str:
         """Return the configured cost calculation mode."""
         return str(self.config_entry.options.get(CONF_COST_MODE, COST_MODE_API))
+
+    @property
+    def period_budget(self) -> float | None:
+        """Return the configured billing-period spending target, if any.
+
+        None when unset or zero, which is what the platforms gate the budget
+        entities on. Options changes reload the entry, so a budget set later
+        creates them without a restart.
+        """
+        budget = self.config_entry.options.get(CONF_PERIOD_BUDGET)
+        if budget is None:
+            return None
+        try:
+            value = float(budget)
+        except (TypeError, ValueError):
+            return None
+        return value if value > 0 else None
 
     def _token_update_callback(self, access_token: str, refresh_token: str) -> None:
         """Handle token updates from the client."""
@@ -840,6 +889,7 @@ class DominionEnergyCoordinator(DataUpdateCoordinator[DominionEnergyData]):
                 profile=profile,
                 day_comparison=day_comparison,
                 baseline=baseline,
+                period_budget=self.period_budget,
                 rate_check_estimated=rate_check_estimated,
                 rate_check_actual=rate_check_actual,
                 rate_check_discrepancy=rate_check_discrepancy,

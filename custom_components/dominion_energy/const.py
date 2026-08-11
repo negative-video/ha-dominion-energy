@@ -29,6 +29,12 @@ CONF_STATISTIC_ID_PREFIX: Final = "statistic_id_prefix"
 # measures its compressor rather than its standing load.
 CONF_HVAC_ENTITIES: Final = "hvac_entities"
 
+# Spending target for one billing period, in dollars. Zero or unset disables
+# the budget entities entirely rather than showing everyone three that read
+# `unknown`. Scoped to the billing period rather than the calendar month
+# because that is the number that turns up on the bill.
+CONF_PERIOD_BUDGET: Final = "period_budget"
+
 # Options keys for cost configuration
 CONF_COST_MODE: Final = "cost_mode"
 CONF_FIXED_RATE: Final = "fixed_rate"

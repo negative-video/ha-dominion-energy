@@ -117,10 +117,12 @@
         "title": "Usage Insights",
         "description": "The always-on baseline measures what your home draws overnight when nothing in particular is running. Selecting your thermostats lets it ignore any half hour the heating or cooling was actually running, which matters if you run the air conditioning at night — without it the sensor measures your compressor rather than your house.",
         "data": {
-          "hvac_entities": "Thermostats"
+          "hvac_entities": "Thermostats",
+          "period_budget": "Billing period budget ($)"
         },
         "data_description": {
-          "hvac_entities": "Leave empty if your heating and cooling never runs overnight. Thermostats that report an action (heating, cooling, idle) give the best result; ones that only report a mode are treated as running whenever they are not off."
+          "hvac_entities": "Leave empty if your heating and cooling never runs overnight. Thermostats that report an action (heating, cooling, idle) give the best result; ones that only report a mode are treated as running whenever they are not off.",
+          "period_budget": "What you would like to keep each bill under. Adds sensors for how much is left and whether you are on pace to go over. Set to 0 to turn them off."
         }
       },
       "fixed_rate": {
@@ -160,6 +162,9 @@
     "binary_sensor": {
       "unusual_usage": {
         "name": "Unusual usage"
+      },
+      "over_budget_pace": {
+        "name": "Over budget pace"
       }
     },
     "sensor": {
@@ -201,6 +206,12 @@
       },
       "projected_period_cost": {
         "name": "Projected billing period cost"
+      },
+      "budget_remaining": {
+        "name": "Budget remaining"
+      },
+      "budget_used": {
+        "name": "Budget used"
       },
       "baseline_load": {
         "name": "Always-on baseline"

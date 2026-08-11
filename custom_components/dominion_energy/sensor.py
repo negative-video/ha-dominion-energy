@@ -273,6 +273,30 @@ SENSORS: tuple[DominionEnergySensorDescription, ...] = (
     ),
 )
 
+# Budget sensors. Only created when a budget is actually configured - see
+# async_setup_entry - so nobody who has not set one gets entities that read
+# `unknown` forever.
+BUDGET_SENSORS: tuple[DominionEnergySensorDescription, ...] = (
+    DominionEnergySensorDescription(
+        key="budget_remaining",
+        translation_key="budget_remaining",
+        native_unit_of_measurement="USD",
+        device_class=SensorDeviceClass.MONETARY,
+        state_class=SensorStateClass.TOTAL,
+        suggested_display_precision=2,
+        value_fn=lambda data: data.budget_remaining,
+    ),
+    DominionEnergySensorDescription(
+        key="budget_used",
+        translation_key="budget_used",
+        native_unit_of_measurement=PERCENTAGE,
+        state_class=SensorStateClass.MEASUREMENT,
+        suggested_display_precision=0,
+        value_fn=lambda data: data.budget_used,
+    ),
+)
+
+
 # Generation (solar export) sensors. Kept separate from SENSORS because they
 # are only created for meters that actually report exported energy - see
 # async_setup_entry.
@@ -308,7 +332,9 @@ GENERATION_SENSORS: tuple[DominionEnergySensorDescription, ...] = (
 )
 
 #: Every description this platform can create, in a stable order.
-ALL_SENSORS: tuple[DominionEnergySensorDescription, ...] = SENSORS + GENERATION_SENSORS
+ALL_SENSORS: tuple[DominionEnergySensorDescription, ...] = (
+    SENSORS + BUDGET_SENSORS + GENERATION_SENSORS
+)
 
 
 def _breakdown_attributes(bill: PeriodBill) -> dict[str, Any]:
@@ -347,6 +373,12 @@ async def async_setup_entry(
         )
 
     async_add_entities(_build(description) for description in SENSORS)
+
+    # Budget entities exist only for people who set a budget. Unlike the
+    # generation gate below this needs no listener: the budget is an option,
+    # and an options change reloads the entry.
+    if coordinator.period_budget is not None:
+        async_add_entities(_build(description) for description in BUDGET_SENSORS)
 
     # Generation entities would be dead weight on the overwhelming majority of
     # meters, which never export anything, so they are only created once the

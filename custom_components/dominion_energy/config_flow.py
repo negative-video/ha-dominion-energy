@@ -47,6 +47,7 @@ from .const import (
     CONF_PEAK_END_HOUR,
     CONF_PEAK_RATE,
     CONF_PEAK_START_HOUR,
+    CONF_PERIOD_BUDGET,
     CONF_REFRESH_TOKEN,
     CONF_SERVICE_ADDRESS,
     CONF_USERNAME,
@@ -683,9 +684,15 @@ class DominionEnergyOptionsFlow(OptionsFlow):
     ) -> ConfigFlowResult:
         """Configure the derived insight sensors."""
         if user_input is not None:
-            return self._save({CONF_HVAC_ENTITIES: user_input[CONF_HVAC_ENTITIES]})
+            return self._save(
+                {
+                    CONF_HVAC_ENTITIES: user_input[CONF_HVAC_ENTITIES],
+                    CONF_PERIOD_BUDGET: user_input[CONF_PERIOD_BUDGET],
+                }
+            )
 
-        current = self._config_entry.options.get(CONF_HVAC_ENTITIES, [])
+        options = self._config_entry.options
+        current = options.get(CONF_HVAC_ENTITIES, [])
 
         return self.async_show_form(
             step_id="insights",
@@ -702,6 +709,12 @@ class DominionEnergyOptionsFlow(OptionsFlow):
                             )
                         )
                     ),
+                    # Zero disables the budget entities rather than creating
+                    # three that can never say anything.
+                    vol.Optional(
+                        CONF_PERIOD_BUDGET,
+                        default=options.get(CONF_PERIOD_BUDGET, 0.0),
+                    ): vol.All(vol.Coerce(float), vol.Range(min=0)),
                 }
             ),
         )
