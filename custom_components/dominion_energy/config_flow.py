@@ -651,6 +651,25 @@ class DominionEnergyOptionsFlow(OptionsFlow):
         self._config_entry = config_entry
         self._selected_mode: str | None = None
 
+    def _save(self, updates: dict[str, Any]) -> ConfigFlowResult:
+        """Persist option changes without discarding the rest.
+
+        An options flow's `async_create_entry` *replaces* `entry.options`
+        wholesale, so writing only the keys a step collected silently drops
+        every option the user set in some other step. Merging keeps unrelated
+        settings alive across an unrelated edit.
+
+        Superseded keys are deliberately left in place rather than pruned:
+        switching cost mode away from time-of-use and back should not lose the
+        peak hours that were configured, and the readers all key off
+        `cost_mode`, so a stale rate is inert. `_cost_options_signature()` only
+        hashes the keys the active mode actually uses, so leftovers cannot
+        trigger a spurious statistics rebuild either.
+        """
+        return self.async_create_entry(
+            title="", data={**self._config_entry.options, **updates}
+        )
+
     async def async_step_init(
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
@@ -666,9 +685,7 @@ class DominionEnergyOptionsFlow(OptionsFlow):
                 return await self.async_step_schedule1()
 
             # API Estimate — no additional config needed
-            return self.async_create_entry(
-                title="", data={CONF_COST_MODE: COST_MODE_API}
-            )
+            return self._save({CONF_COST_MODE: COST_MODE_API})
 
         current_options = self._config_entry.options
 
@@ -696,12 +713,11 @@ class DominionEnergyOptionsFlow(OptionsFlow):
     ) -> ConfigFlowResult:
         """Step 2a: Configure fixed rate."""
         if user_input is not None:
-            return self.async_create_entry(
-                title="",
-                data={
+            return self._save(
+                {
                     CONF_COST_MODE: COST_MODE_FIXED,
                     CONF_FIXED_RATE: user_input[CONF_FIXED_RATE],
-                },
+                }
             )
 
         current_options = self._config_entry.options
@@ -725,15 +741,14 @@ class DominionEnergyOptionsFlow(OptionsFlow):
     ) -> ConfigFlowResult:
         """Step 2b: Configure time-of-use rates."""
         if user_input is not None:
-            return self.async_create_entry(
-                title="",
-                data={
+            return self._save(
+                {
                     CONF_COST_MODE: COST_MODE_TOU,
                     CONF_PEAK_RATE: user_input[CONF_PEAK_RATE],
                     CONF_OFF_PEAK_RATE: user_input[CONF_OFF_PEAK_RATE],
                     CONF_PEAK_START_HOUR: user_input[CONF_PEAK_START_HOUR],
                     CONF_PEAK_END_HOUR: user_input[CONF_PEAK_END_HOUR],
-                },
+                }
             )
 
         current_options = self._config_entry.options
@@ -773,9 +788,7 @@ class DominionEnergyOptionsFlow(OptionsFlow):
     ) -> ConfigFlowResult:
         """Step 2c: Confirm Schedule 1 selection."""
         if user_input is not None:
-            return self.async_create_entry(
-                title="", data={CONF_COST_MODE: COST_MODE_SCHEDULE_1}
-            )
+            return self._save({CONF_COST_MODE: COST_MODE_SCHEDULE_1})
 
         return self.async_show_form(
             step_id="schedule1",

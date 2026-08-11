@@ -112,6 +112,51 @@ CONFIG_ERRORS = _error_keys(CONFIG_FLOW_CLASS)
 CONFIG_ABORTS = _abort_reasons(CONFIG_FLOW_CLASS)
 
 
+class TestOptionsAreNotClobbered:
+    """An options flow's ``async_create_entry`` replaces ``entry.options``.
+
+    Writing only the keys one step collected therefore silently deletes every
+    option set by a different step. The flow routes all of its writes through
+    one merging helper so that cannot happen; these checks are what stop a new
+    step from quietly reintroducing the bug.
+    """
+
+    def _options_flow_source(self) -> str:
+        return ast.unparse(_class_node(OPTIONS_FLOW_CLASS))
+
+    def test_the_merge_helper_exists_and_merges(self) -> None:
+        source = self._options_flow_source()
+        assert "_save" in source
+        assert "self._config_entry.options" in source, (
+            "the save helper must fold new values into the existing options"
+        )
+
+    def test_no_step_calls_async_create_entry_directly(self) -> None:
+        """Every write goes through the helper, so every write merges."""
+        class_node = _class_node(OPTIONS_FLOW_CLASS)
+        direct = [
+            node
+            for node in _method_calls(class_node, "async_create_entry")
+            # The helper itself is the one legitimate caller.
+            if not _inside_function(class_node, node, "_save")
+        ]
+        assert not direct, (
+            "an options step calls async_create_entry directly; it will "
+            "discard every option collected by the other steps"
+        )
+
+
+def _inside_function(class_node: ast.ClassDef, target: ast.AST, name: str) -> bool:
+    """Report whether ``target`` sits inside the named method of a class."""
+    for node in class_node.body:
+        if (
+            isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+            and node.name == name
+        ):
+            return any(child is target for child in ast.walk(node))
+    return False
+
+
 def test_translations_file_exists() -> None:
     """Home Assistant reads translations/en.json, not strings.json."""
     assert TRANSLATIONS_PATH.is_file(), (
