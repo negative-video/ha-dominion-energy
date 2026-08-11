@@ -331,11 +331,6 @@ GENERATION_SENSORS: tuple[DominionEnergySensorDescription, ...] = (
     ),
 )
 
-#: Every description this platform can create, in a stable order.
-ALL_SENSORS: tuple[DominionEnergySensorDescription, ...] = (
-    SENSORS + BUDGET_SENSORS + GENERATION_SENSORS
-)
-
 
 def _breakdown_attributes(bill: PeriodBill) -> dict[str, Any]:
     """Render a priced billing period as flat, readable attributes.

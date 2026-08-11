@@ -25,6 +25,12 @@
 - Billing-period usage and cost to date, plus a projected end-of-period bill
 - Excess generation (solar / net metering) usage and statistics, when the meter reports it
 - Bill forecast sensors (last bill, current billing period, effective rate)
+- A breakdown of where the projected bill goes — distribution, generation, riders, transmission and tax
+- Usage insights derived from your own interval data:
+  - **Always-on baseline** — what the house draws when nothing is happening, ignoring any half hour your thermostats were running
+  - **Busiest hour** — which hour of the day the house uses most, with the full 24-hour shape
+  - **Unusual usage** — a binary sensor for a day that was out of character for that weekday
+  - **Budget** — optional spending target, with dollars left and an on-pace warning
 - Cost estimation with four calculation modes:
   - **API Estimate**: Derives rate from your actual bill (charges / usage)
   - **Fixed Rate**: Single $/kWh rate
@@ -74,12 +80,19 @@ If you have several meters on one account, add the integration once per meter �
 
 ### Configure Cost Calculation (Optional)
 
-1. After setup, click "Configure" on the integration
+1. After setup, click "Configure" on the integration, then **Cost calculation**
 2. Choose your cost calculation method:
    - **API Estimate**: Uses your actual bill rate (recommended)
    - **Fixed Rate**: Enter a single $/kWh rate
    - **Time-of-Use**: Configure peak/off-peak rates and hours
    - **Schedule 1 - VA Residential**: Applies the full Virginia residential tariff; no extra input needed
+
+### Configure Usage Insights (Optional)
+
+Under "Configure" → **Usage insights**:
+
+- **Thermostats** — select your `climate` entities so the always-on baseline can ignore any half hour the heating or cooling was actually running. This matters most if you run air conditioning overnight: without it, the baseline measures your compressor rather than your house. Thermostats that report an *action* (`heating`, `cooling`, `idle`) give the best result; ones that only report a mode are treated as running whenever they are not `off`.
+- **Billing period budget** — what you would like to keep each bill under. Set it to add the budget sensors; leave it at 0 and they are not created at all.
 
 ## Sensors
 
@@ -98,6 +111,34 @@ If you have several meters on one account, add the integration once per meter �
 | Last bill charges | Charges from previous bill ($) | total |
 | Last bill usage | Usage from previous bill (kWh) | total |
 | Effective rate | Derived cost per kWh ($/kWh) | measurement |
+| Always-on baseline | Standing draw when nothing is running (W) | measurement |
+| Busiest hour | The hour of the day the house uses most, e.g. `6 PM` | — |
+
+**Projected billing period cost** carries the bill's line items as attributes — `distribution_charge`, `generation_charge`, `rider_charges`, `transmission_charge`, `consumption_tax` and `customer_charge` — so you can see *why* a bill moved when your usage did not. These are always priced with the full Schedule 1 tariff; `breakdown_matches_state` tells you whether they add up to the sensor's own value or sit alongside it (they only match in Schedule 1 cost mode).
+
+### Understanding your usage
+
+| Entity | Description |
+|--------|-------------|
+| Always-on baseline | The median of each night's quietest half hour, as watts. Attributes carry the daily kWh it accounts for, an estimated monthly cost, and its share of a typical day. |
+| Busiest hour | Averaged over the last 30 complete days. `hourly_average_kwh` is a 24-element list you can feed straight to a chart card. |
+| Unusual usage | `binary_sensor`, device class `problem`. Compares the latest complete day against the median of the same weekday over the previous four weeks. |
+
+The always-on baseline is the most directly actionable number here — it is the fridge, the network gear, the standby loads, everything you never switch off. A sudden jump in it usually means something broke rather than something changed.
+
+> **Note**: These need history to say anything. The baseline needs three usable nights, the busiest hour needs seven complete days, and unusual usage needs two prior same-weekdays. Until then they report `unknown` rather than guessing.
+
+### Budget (optional)
+
+Set a billing period budget under "Configure" → "Usage insights" and three more entities appear:
+
+| Entity | Description |
+|--------|-------------|
+| Budget remaining | Dollars left in the period; goes negative once overspent ($) |
+| Budget used | Percent of the budget spent so far (%) |
+| Over budget pace | `binary_sensor`, device class `problem` — on when the *projection* exceeds the budget |
+
+**Over budget pace** deliberately watches the projection rather than spend to date, so it can warn you on day 6 of 30 while there is still time to do something. Its attributes carry the budget, the projection, and `days_left_in_period`.
 
 ### Solar / net metering
 

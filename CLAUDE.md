@@ -14,7 +14,8 @@ Home Assistant custom integration (domain `dominion_energy`) for monitoring Domi
   `async_step_user` (email + password) → `async_step_tfa_select` (pick SMS/email target) → `async_step_tfa_code` (enter code) → `async_step_discover_accounts` → `async_step_select_meter`.
   TFA steps are skipped when Gigya does not ask for it. Discovery keeps only meters where `is_active and has_ami`; a single match auto-creates the entry, multiple matches show the selection form.
   Separate paths: `async_step_reauth` / `async_step_reauth_confirm` (retries stored credentials first, falls back to a credential form, then `reauth_tfa_select` / `reauth_tfa_code`) and `async_step_reconfigure`, which re-runs the user step.
-  `DominionEnergyOptionsFlow` configures cost calculation: `init` → `fixed_rate` | `tou` | `schedule1`, or straight to entry creation for API estimate mode.
+  `DominionEnergyOptionsFlow` shows a menu at `init` with two branches: `cost` → `fixed_rate` | `tou` | `schedule1` (or straight to entry creation for API estimate mode), and `insights` for the thermostat list and the budget.
+  **Every write goes through `_save()`, which merges into the existing options.** An options flow's `async_create_entry` *replaces* `entry.options` wholesale, so a step that writes only its own keys deletes everything the other steps stored. `tests/test_translations.py` fails if any step calls `async_create_entry` directly.
 
 - **`coordinator.py`**: `DominionEnergyCoordinator` extends `DataUpdateCoordinator`, polling every `UPDATE_INTERVAL_MINUTES` (60). Fetches the bill forecast, then one interval window wide enough to cover both the calendar month and the billing period, sliced locally; calculates costs; and writes external statistics. A per-day cache (`_cached_data_date`) short-circuits repeat cycles once the day's data is complete and its statistics have settled, so a normal day costs ~4 API calls rather than one set per cycle. Also owns auto-reauth (`_async_attempt_reauth`, using stored credentials and cookies) and token persistence via `_token_update_callback`.
 
@@ -29,7 +30,15 @@ Home Assistant custom integration (domain `dominion_energy`) for monitoring Domi
 
 - **`rates.py`**: Full Virginia Residential Schedule 1 tariff (`VA_SCHEDULE_1`) plus the calculation engine — seasonal tiered distribution/generation rates, flat riders, transmission, and tiered consumption tax. `calculate_schedule1_interval_cost()` prices a single interval given cumulative kWh so far in the billing period.
 
-- **`sensor.py`**: Sensors built from a `DominionEnergySensorDescription` dataclass (a `SensorEntityDescription` with a `value_fn`). 22 sensors across two tuples: `SENSORS` (usage, cost, billing period, projection, and six diagnostic entities) and `GENERATION_SENSORS`, which are only added once the meter actually reports export — at setup if `has_generation` is already true, otherwise via a coordinator listener when it first becomes true. Descriptions set `translation_key`, never `name=`, so names come from the translation files. Entity unique IDs and the device identifier use a prefix that is the account number for an account's first meter and `{account}_{meter}` for later ones, so existing installations keep their identity.
+- **`sensor.py`**: Sensors built from a `DominionEnergySensorDescription` dataclass (a `SensorEntityDescription` with a `value_fn`). Three tuples: `SENSORS` (usage, cost, billing period, projection, the insight sensors, and six diagnostic entities), `BUDGET_SENSORS`, and `GENERATION_SENSORS`. The latter two are conditional, and gated differently on purpose — a budget is an option, and an options change reloads the entry, so a check at setup is enough; `has_generation` can flip true on a later refresh, so that one keeps a coordinator listener rather than making people restart. Descriptions set `translation_key`, never `name=`, so names come from the translation files.
+
+- **`binary_sensor.py`**: `unusual_usage` (always) and `over_budget_pace` (only with a budget), both device class `PROBLEM`. Their `value_fn` returns `None` rather than `False` when there is not yet enough data — a PROBLEM sensor at `off` asserts that everything is fine, which is a claim the integration has to earn.
+
+- **`entity.py`**: The unique-ID prefix and `DeviceInfo` both platforms share, resolved once per entry by `resolve_identity()`, plus the `DominionEnergyEntity` base that owns the one f-string every unique ID is built from. The prefix is the account number for an account's first meter and `{account}_{meter}` for later ones, so existing installations keep their identity. `_uses_legacy_identity()` enumerates the entry's own registry entries and excludes anything under the meter-scoped prefix — without that exclusion a meter-scoped entry re-reads itself as legacy on the next restart and changes its own identity. Never let a platform build its own unique ID or `DeviceInfo`; `tests/test_entity.py` fails if one does.
+
+- **`insights.py`**: Pure derived metrics with **no Home Assistant imports** — the daily usage profile, the always-on baseline, and the same-weekday comparison. Two things here are load-bearing:
+  1. **The baseline reads `hvac_action`, not the thermostat's state.** A thermostat set to `cool` is not drawing power until the compressor starts; treating "set to cool" as "running" excludes the whole night for anyone who leaves it on, which is exactly the household the filtering exists for. Thermostats reporting no action fall back to the mode (anything but `off` counts as running), which discards usable data rather than folding compressor draw into the answer.
+  2. **Same-weekday, median, not a trailing mean.** Household electricity is strongly weekly; comparing a Saturday against a mostly-weekday window flags every Saturday. The median stops one already-exceptional day raising the bar and hiding the next.
 
 - **`const.py`**: Config/option keys, the four cost-mode constants, `UPDATE_INTERVAL_MINUTES`, `BACKFILL_DAYS`, and rate defaults.
 
@@ -90,6 +99,7 @@ Sharp edges already handled — do not regress them:
 ### Home Assistant Integration Patterns Used
 
 - `ConfigEntry.runtime_data` holds the coordinator; type alias `type DominionEnergyConfigEntry = ConfigEntry[DominionEnergyCoordinator]` (PEP 695, needs Python 3.12+).
+- Platforms are `binary_sensor` and `sensor`, forwarded from `PLATFORMS` in `__init__.py`.
 - Config entry unique ID is `f"{account_number}_{meter_device_id}"` so several meters on one account can each be added. `ConfigFlow.VERSION = 2`; the v1 → v2 unique ID migration lives in `__init__.py`.
 - Token persistence via `hass.config_entries.async_update_entry()` inside the client callback.
 - `ConfigEntryAuthFailed` triggers the reauth flow.
@@ -102,14 +112,18 @@ Sharp edges already handled — do not regress them:
 - `tests/test_rates.py` — Schedule 1 tariff math and the effective-dated schedule registry. The engine tests pin `get_schedule_for_date(date(2026, 1, 1))` on purpose: their expected values come from that worksheet, so they are regression tests of the calculation, not of current rates.
 - `tests/test_usage.py` — the pure helpers in `usage.py`, including the DST and billing-period regressions.
 - `tests/test_features.py` — projection maths, rate-drift comparison, generation aggregation, statistic-ID resolution.
-- `tests/test_sensor.py` — translation-key coverage in both directions, entity naming, device/state class legality, unique-ID scheme.
+- `tests/test_sensor.py` — translation-key coverage in both directions, entity naming, device/state class legality, and the conditional-group gating.
+- `tests/test_binary_sensor.py` — the same contract for the binary sensor platform, plus that "off" and "unknown" stay distinguishable.
+- `tests/test_entity.py` — the unique-ID and device-identifier schemes, and that no platform reimplements either. Treat this the way `test_diagnostics.py` is treated: a regression here silently discards every user's recorded history.
+- `tests/test_insights.py` — the derived metrics. Loads `insights.py` and `usage.py` into a private synthetic package so their relative imports resolve without executing the integration's `__init__.py`.
+- `tests/astkit.py` — not a test module; the shared `ast` plumbing the source-inspecting tests use.
 - `tests/test_diagnostics.py` — redaction. Treat this as security-relevant: it asserts no fake credential appears anywhere in the output.
 - `tests/test_translations.py` — `translations/en.json` exists, matches `strings.json`, and covers every step, error, and abort reason parsed out of `config_flow.py`.
 - `tests/test_green_button.py` — ESPI parsing and the timestamp realignment. Fixtures are generated in-process and reproduce Dominion's fixed-offset defect deliberately; a real export embeds an account number and a full hourly record of household occupancy and **must never enter the repository** (`.gitignore` covers `GreenButton*.xml`).
 
 Two CI test jobs: `test` (Python 3.12/3.13, `dev` extra only) enforces that the suite stays runnable without Home Assistant, and `test-ha` (Python 3.14, `test-ha` extra) runs it against the pinned HA release. `pytest-homeassistant-custom-component` pins one exact HA version and needs Python >= 3.14.2, which is why it is an optional extra rather than a base dependency. Keep new tests importable without `homeassistant` — files that need it follow the loader pattern in `test_diagnostics.py`.
 
-Not covered by tests: coordinator orchestration that genuinely needs a `hass` object (statistic-prefix resolution against a live recorder, backfill branch selection, the entity-registry probe in `sensor.py`), and the config flow state machine. Verifying those needs a real HA instance and a mocked `DompowerClient`.
+Not covered by tests: coordinator orchestration that genuinely needs a `hass` object (statistic-prefix resolution against a live recorder, backfill branch selection, the entity-registry probe in `entity.py`, and the recorder read in `_async_hvac_windows`), and the config flow state machine. Verifying those needs a real HA instance and a mocked `DompowerClient`.
 
 Lint and format run over `custom_components/` **and** `tests/`, with Ruff pinned in both CI and pre-commit — keep those two versions in sync. `[tool.ruff.lint.isort]` in `pyproject.toml` mirrors Home Assistant's import convention; without it Ruff's defaults reorder imports away from the style used throughout this integration.
 
