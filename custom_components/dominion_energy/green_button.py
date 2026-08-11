@@ -40,6 +40,7 @@ from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 import logging
+import re
 from xml.etree import ElementTree
 from zoneinfo import ZoneInfo
 
@@ -73,6 +74,21 @@ MIN_OVERLAP_HOURS = 48
 # scores 0.98 at the right shift and below 0.65 at every wrong one, so this sits
 # well clear of both.
 MIN_CORRELATION = 0.85
+
+# ESPI flow directions. 1 is energy delivered to the customer; 19 is energy
+# fed back. Importing a generation export as consumption would silently double
+# a solar customer's usage.
+FLOW_DIRECTION_DELIVERED = 1
+
+# A parsed export whose daily average differs from known-good data by more than
+# this factor is refused. A misread unit or multiplier lands orders of magnitude
+# out, so this catches those without tripping on ordinary seasonal variation
+# between the export's span and the reference window.
+MAX_DAILY_AVERAGE_RATIO = 4.0
+
+# Entity declarations are the vector for expansion attacks against an XML
+# parser. Nothing legitimate in a Green Button export needs them.
+_DANGEROUS_XML = re.compile(rb"<!\s*(DOCTYPE|ENTITY)", re.IGNORECASE)
 
 
 class GreenButtonError(Exception):
@@ -166,8 +182,16 @@ def parse_export(data: bytes | str) -> GreenButtonExport:
         GreenButtonError: If the XML is malformed, carries no readings, or
             uses a unit of measure we cannot convert.
     """
+    raw = data.encode() if isinstance(data, str) else data
+    if _DANGEROUS_XML.search(raw):
+        # ElementTree does not fetch external entities, but it will happily
+        # expand internal ones until it exhausts memory.
+        raise GreenButtonError(
+            "Export declares an XML DOCTYPE or ENTITY, which a Green Button "
+            "file has no need of; refusing to parse it"
+        )
     try:
-        root = ElementTree.fromstring(data)
+        root = ElementTree.fromstring(raw)
     except ElementTree.ParseError as err:
         raise GreenButtonError(f"Not valid XML: {err}") from err
 
@@ -396,6 +420,36 @@ def drop_incomplete_tail(
     if keep_through is None:
         return []
     return [r for r in readings if r[0].astimezone(tz).date() <= keep_through]
+
+
+def daily_average_kwh(
+    hourly: dict[datetime, float], tz: ZoneInfo = DOMINION_TZ
+) -> float:
+    """Return mean kWh per covered day. Zero when there is nothing to average."""
+    if not hourly:
+        return 0.0
+    days = {start.astimezone(tz).date() for start in hourly}
+    return sum(hourly.values()) / len(days)
+
+
+def magnitude_looks_wrong(
+    candidate: dict[datetime, float],
+    reference: dict[datetime, float],
+    max_ratio: float = MAX_DAILY_AVERAGE_RATIO,
+) -> bool:
+    """Report whether two series disagree implausibly on daily consumption.
+
+    Correlation is scale-invariant, so a series read with the wrong unit or
+    power-of-ten multiplier can still correlate perfectly while being a
+    thousand times too large. This is the guard for that: it compares
+    magnitude, which correlation deliberately ignores.
+    """
+    ref = daily_average_kwh(reference)
+    cand = daily_average_kwh(candidate)
+    if ref <= 0 or cand <= 0:
+        return False
+    ratio = cand / ref
+    return ratio > max_ratio or ratio < 1 / max_ratio
 
 
 def describe_path_problem(path: str, allowed_dirs: Iterable[str]) -> str:

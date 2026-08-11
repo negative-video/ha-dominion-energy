@@ -405,3 +405,96 @@ class TestPathGuidance:
     def test_empty_allowlist_does_not_crash(self):
         message = gb.describe_path_problem("/tmp/x.xml", [])
         assert "(none)" in message
+
+
+class TestHardening:
+    """Guards against inputs that would otherwise write plausible-looking junk."""
+
+    def test_doctype_is_refused(self):
+        """Entity expansion is the classic way to kill an XML parser."""
+        payload = (
+            b'<?xml version="1.0"?><!DOCTYPE feed [<!ENTITY a "aaaaaaaaaa">]>'
+            b'<feed xmlns="http://naesb.org/espi"></feed>'
+        )
+        with pytest.raises(gb.GreenButtonError, match="DOCTYPE or ENTITY"):
+            gb.parse_export(payload)
+
+    def test_entity_declaration_is_refused(self):
+        payload = b'<!ENTITY x "y"><feed xmlns="http://naesb.org/espi"></feed>'
+        with pytest.raises(gb.GreenButtonError, match="DOCTYPE or ENTITY"):
+            gb.parse_export(payload)
+
+    def test_ordinary_export_still_parses(self):
+        """The guard must not reject legitimate files."""
+        export = gb.parse_export(
+            build_export(
+                hourly_series(datetime(2026, 7, 1, 0), 24), export_offset_hours=-4
+            )
+        )
+        assert len(export.readings) == 24
+
+    def test_reverse_flow_direction_is_reported(self):
+        """A generation export imported as consumption would double usage."""
+        export = gb.parse_export(
+            build_export(
+                hourly_series(datetime(2026, 7, 1, 0), 24),
+                export_offset_hours=-4,
+                flow_direction=19,
+            )
+        )
+        assert export.flow_direction == 19
+        assert export.flow_direction != gb.FLOW_DIRECTION_DELIVERED
+
+    def test_scale_error_is_caught_despite_perfect_correlation(self):
+        """Correlation is scale-invariant, so magnitude needs its own check.
+
+        A misread powerOfTenMultiplier produces a series that correlates
+        perfectly while being a thousand times too large.
+        """
+        wall = hourly_series(datetime(2026, 7, 1, 0), 24 * 10)
+        export = gb.parse_export(build_export(wall, export_offset_hours=-4))
+        good = gb.to_hourly(list(export.readings))
+        thousand_x = {k: v * 1000 for k, v in good.items()}
+
+        best = gb.best_alignment(thousand_x, good)
+        assert best is not None
+        assert best.correlation == pytest.approx(1.0), "correlation cannot see scale"
+        assert gb.magnitude_looks_wrong(thousand_x, good)
+
+    def test_matching_magnitude_passes(self):
+        wall = hourly_series(datetime(2026, 7, 1, 0), 24 * 10)
+        export = gb.parse_export(build_export(wall, export_offset_hours=-4))
+        good = gb.to_hourly(list(export.readings))
+        assert not gb.magnitude_looks_wrong(good, good)
+
+    def test_ordinary_variation_is_tolerated(self):
+        """Seasonal difference between an export and the reference is normal."""
+        wall = hourly_series(datetime(2026, 7, 1, 0), 24 * 10)
+        export = gb.parse_export(build_export(wall, export_offset_hours=-4))
+        good = gb.to_hourly(list(export.readings))
+        somewhat_higher = {k: v * 1.8 for k, v in good.items()}
+        assert not gb.magnitude_looks_wrong(somewhat_higher, good)
+
+    def test_empty_series_is_not_flagged_as_wrong_magnitude(self):
+        assert not gb.magnitude_looks_wrong({}, {})
+
+    def test_trim_runs_in_the_corrected_frame(self):
+        """Completeness depends on the local hour, so it must follow the shift.
+
+        Trimming before the offset is applied judges each day against the wrong
+        hour-of-day, and moves the boundary by the size of the offset.
+        """
+        readings = [(datetime(2026, 8, 9, h), 3) for h in range(24)]
+        readings += [(datetime(2026, 8, 10, h), 3) for h in range(20)]
+        readings += [(datetime(2026, 8, 10, h), 0) for h in range(20, 24)]
+        export = gb.parse_export(build_export(readings, export_offset_hours=-4))
+        raw = list(export.readings)
+
+        wrong_order = gb.apply_shift(gb.drop_incomplete_tail(raw), 5)
+        right_order = gb.drop_incomplete_tail(gb.apply_shift(raw, 5))
+
+        last_wrong = max(t for t, _ in wrong_order).astimezone(NY)
+        last_right = max(t for t, _ in right_order).astimezone(NY)
+        assert last_wrong != last_right
+        # Corrected frame: the last complete day ends at its own 23:00 local.
+        assert last_right.hour == 23

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
@@ -72,11 +73,13 @@ from .const import (
     UPDATE_INTERVAL_MINUTES,
 )
 from .green_button import (
+    FLOW_DIRECTION_DELIVERED,
     MIN_CORRELATION,
     GreenButtonExport,
     apply_shift,
     best_alignment,
     drop_incomplete_tail,
+    magnitude_looks_wrong,
     merge_preferring,
     parse_export,
     to_hourly,
@@ -426,6 +429,9 @@ class DominionEnergyCoordinator(DataUpdateCoordinator[DominionEnergyData]):
         # Day whose data has already been fetched, so repeated update cycles
         # within the same day don't re-download the same Excel exports
         self._cached_data_date: date | None = None
+        # Imports rewrite the whole statistics chain, so two running at once
+        # would interleave their sums.
+        self._import_lock = asyncio.Lock()
         # Prefix the external statistic IDs are built from, resolved once in
         # _async_setup() and persisted in the entry data from then on
         self._statistic_id_prefix: str | None = config_entry.data.get(
@@ -1839,6 +1845,13 @@ class DominionEnergyCoordinator(DataUpdateCoordinator[DominionEnergyData]):
         Returns a summary describing what was (or, for a dry run, would be)
         written.
         """
+        async with self._import_lock:
+            return await self._async_import_green_button(file_paths, dry_run=dry_run)
+
+    async def _async_import_green_button(
+        self, file_paths: list[str], *, dry_run: bool = False
+    ) -> dict[str, Any]:
+        """Do the work of :meth:`async_import_green_button`, under its lock."""
         assert self._client is not None
 
         consumption_id, cost_id, _ = self._statistic_ids()
@@ -1884,7 +1897,22 @@ class DominionEnergyCoordinator(DataUpdateCoordinator[DominionEnergyData]):
         while pending:
             progressed = False
             for entry_index, (path, export) in enumerate(pending):
-                raw_hourly = to_hourly(drop_incomplete_tail(list(export.readings)))
+                if (
+                    export.flow_direction is not None
+                    and export.flow_direction != FLOW_DIRECTION_DELIVERED
+                ):
+                    raise HomeAssistantError(
+                        f"{path} has ESPI flowDirection "
+                        f"{export.flow_direction}, which is not energy "
+                        "delivered to the customer. Importing it as "
+                        "consumption would misstate your usage."
+                    )
+
+                readings = list(export.readings)
+                # Trim before calibrating only so the zero padding at the end
+                # cannot drag the correlation around; the authoritative trim
+                # happens below, once the timestamps are corrected.
+                calibration_series = to_hourly(drop_incomplete_tail(readings))
                 against = (
                     reference_hourly
                     if not imported
@@ -1893,16 +1921,27 @@ class DominionEnergyCoordinator(DataUpdateCoordinator[DominionEnergyData]):
                         **reference_hourly,
                     }
                 )
-                alignment = best_alignment(raw_hourly, against)
+                alignment = best_alignment(calibration_series, against)
                 if alignment is None or not alignment.is_convincing:
                     continue
 
-                shifted = to_hourly(
-                    apply_shift(
-                        drop_incomplete_tail(list(export.readings)),
-                        alignment.shift_hours,
-                    )
+                # Trim in the corrected frame. Deciding which trailing days are
+                # complete depends on the local hour a day reaches, which is
+                # only meaningful once the offset has been applied.
+                corrected = drop_incomplete_tail(
+                    apply_shift(readings, alignment.shift_hours)
                 )
+                shifted = to_hourly(corrected)
+
+                if magnitude_looks_wrong(shifted, against):
+                    raise HomeAssistantError(
+                        f"{path} lines up in shape but not in magnitude: it "
+                        f"averages {sum(shifted.values()) / max(len(shifted) / 24, 1):.0f} "
+                        "kWh/day against known-good data. Correlation cannot "
+                        "see a scale error, so the import was refused rather "
+                        "than writing usage off by a factor."
+                    )
+
                 imported.update(shifted)
                 sources.append(
                     {
@@ -1916,6 +1955,7 @@ class DominionEnergyCoordinator(DataUpdateCoordinator[DominionEnergyData]):
                             alignment.mean_absolute_error_kwh, 3
                         ),
                         "hours_after_trim": len(shifted),
+                        "hours_dropped_as_incomplete": len(readings) - len(corrected),
                         "first_hour": min(shifted).isoformat() if shifted else None,
                         "last_hour": max(shifted).isoformat() if shifted else None,
                         "total_kwh": round(sum(shifted.values()), 3),
