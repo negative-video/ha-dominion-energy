@@ -1,12 +1,13 @@
 """Tests for Green Button (ESPI) parsing and timestamp realignment.
 
-The interesting behaviour under test is not parsing but *correction*. Dominion
-stamps every reading in an export with whichever UTC offset was in effect when
-the file was generated, rather than the offset that applied to each reading, so
-about half of any export is an hour out. The fixtures below reproduce that
-defect synthetically -- the same underlying usage exported twice, once in
-standard time and once in daylight time -- and assert that after realignment
-the two agree, which is exactly the property that makes an import safe.
+The interesting behaviour under test is not parsing but *calibration*.
+Dominion's exports carry a constant timestamp offset that cannot be derived
+from the file -- a real August export measured +5 hours against the utility's
+own API readings, and a February one +4. An earlier version of this module
+tried to model the offset from the export date and DST rules; it produced two
+exports that agreed with each other perfectly while both sat five hours from
+the truth. So these tests assert that the offset is *measured* against known-
+good data and that a bad fit is refused, not that any particular model holds.
 
 No Home Assistant import, so this runs in the lightweight CI job. Fixtures are
 generated in-process: real exports embed an account number and a full hourly
@@ -103,8 +104,20 @@ def build_export(
 
 
 def hourly_series(start_local: datetime, hours: int, base: int = 2):
-    """Build a deterministic wall-clock series with a daily shape."""
-    return [(start_local + timedelta(hours=i), base + (i % 5)) for i in range(hours)]
+    """Build a deterministic, *non-periodic* wall-clock series.
+
+    Deterministic so tests are reproducible, but non-repeating on purpose: a
+    series with a short period correlates perfectly at every multiple of that
+    period, which makes any alignment assertion meaningless. A simple LCG plus
+    a daily shape keeps it realistic without that degeneracy.
+    """
+    readings = []
+    state = 12345
+    for i in range(hours):
+        state = (1103515245 * state + 12345) % 2147483648
+        daily = (i % 24) // 6  # coarse morning/day/evening/night shape
+        readings.append((start_local + timedelta(hours=i), base + daily + state % 5))
+    return readings
 
 
 class TestParsing:
@@ -185,139 +198,101 @@ class TestParsing:
         assert export.exported_at == export.last_start
 
 
-class TestExportOffsetDetection:
-    """Which UTC offset the file was built with."""
-
-    def test_summer_export_is_daylight_time(self):
-        assert gb.export_offset_hours(datetime(2026, 8, 11, 22, tzinfo=UTC)) == -4
-
-    def test_winter_export_is_standard_time(self):
-        assert gb.export_offset_hours(datetime(2026, 2, 5, 22, tzinfo=UTC)) == -5
-
-    def test_unknown_export_time_assumes_standard(self):
-        assert gb.export_offset_hours(None) == -5
-
-
-class TestRealignment:
-    """The defect this module exists to correct."""
-
-    def test_two_exports_of_the_same_usage_agree_after_realignment(self):
-        """The decisive property.
-
-        The same wall-clock usage, exported once in EST and once in EDT, is
-        stamped an hour apart by Dominion. Raw, the two disagree; realigned,
-        they must match exactly. This mirrors the real-world observation of
-        54.6% raw agreement rising to 99.9% after correction.
-        """
-        readings = hourly_series(datetime(2025, 12, 1, 0), 24 * 40)
-
-        winter_file = gb.parse_export(
-            build_export(
-                readings,
-                export_offset_hours=-5,
-                exported_at=datetime(2026, 2, 5, 22, tzinfo=UTC),
-            )
-        )
-        summer_file = gb.parse_export(
-            build_export(
-                readings,
-                export_offset_hours=-4,
-                exported_at=datetime(2026, 8, 11, 22, tzinfo=UTC),
-            )
-        )
-
-        raw_winter = gb.to_hourly(list(winter_file.readings))
-        raw_summer = gb.to_hourly(list(summer_file.readings))
-        shared_raw = set(raw_winter) & set(raw_summer)
-        assert shared_raw, "fixtures must overlap for the test to mean anything"
-        raw_matches = sum(1 for h in shared_raw if raw_winter[h] == raw_summer[h])
-        assert raw_matches < len(shared_raw), (
-            "fixture does not reproduce the defect: raw exports already agree"
-        )
-
-        fixed_winter = gb.to_hourly(
-            gb.realign_to_local(
-                winter_file.readings, gb.export_offset_hours(winter_file.exported_at)
-            )
-        )
-        fixed_summer = gb.to_hourly(
-            gb.realign_to_local(
-                summer_file.readings, gb.export_offset_hours(summer_file.exported_at)
-            )
-        )
-        assert fixed_winter == fixed_summer
-
-    def test_realigned_hours_match_intended_wall_clock(self):
-        """A reading meant for 18:00 local must land on 18:00 local."""
-        wall = datetime(2026, 1, 15, 18)
-        export = gb.parse_export(
-            build_export(
-                [(wall, 3)],
-                export_offset_hours=-4,  # exported in summer, reading in winter
-                exported_at=datetime(2026, 8, 11, 22, tzinfo=UTC),
-            )
-        )
-        ((recorded, _),) = export.readings
-        assert recorded.astimezone(NY).hour != 18, "fixture should be an hour out"
-
-        fixed = gb.realign_to_local(export.readings, -4)
-        assert fixed[0][0].astimezone(NY).hour == 18
-
-    def test_spring_forward_gap_readings_are_dropped(self):
-        """02:00 on a spring-forward date is not a real instant."""
-        readings = [
-            (datetime(2026, 3, 8, 1), 1),
-            (datetime(2026, 3, 8, 2), 9),  # does not exist locally
-            (datetime(2026, 3, 8, 3), 1),
-        ]
-        export = gb.parse_export(build_export(readings, export_offset_hours=-5))
-        fixed = gb.realign_to_local(export.readings, -5)
-        local_hours = {dt.astimezone(NY).hour for dt, _ in fixed}
-        assert 2 not in local_hours
-        assert len(fixed) == 2
-
-    def test_total_is_preserved_when_no_gap_is_involved(self):
-        readings = hourly_series(datetime(2026, 6, 1, 0), 72)
-        export = gb.parse_export(build_export(readings, export_offset_hours=-4))
-        fixed = gb.realign_to_local(export.readings, -4)
-        assert sum(v for _, v in fixed) == pytest.approx(export.total_kwh)
-
-
-class TestShiftScoring:
-    """Verification against known-good reference data."""
+class TestCalibration:
+    """Measuring the offset, rather than assuming one."""
 
     @staticmethod
-    def _series(start_local: datetime, hours: int):
-        return {
-            (start_local + timedelta(hours=i))
-            .replace(tzinfo=NY)
-            .astimezone(UTC): float(2 + (i % 5))
-            for i in range(hours)
-        }
+    def _series(readings, shift=0):
+        return gb.to_hourly(gb.apply_shift(readings, shift))
 
-    def test_perfectly_aligned_series_scores_zero_shift(self):
-        ref = self._series(datetime(2026, 7, 1, 0), 96)
-        best = gb.best_hour_shift(dict(ref), ref)
+    def test_measures_a_known_offset(self):
+        wall = hourly_series(datetime(2026, 7, 1, 0), 24 * 10)
+        truth = gb.parse_export(build_export(wall, export_offset_hours=-4))
+        reference = self._series(list(truth.readings))
+        # An export whose timestamps sit 5 hours early, as Dominion's do.
+        skewed = self._series(list(truth.readings), -5)
+        best = gb.best_alignment(skewed, reference)
+        assert best is not None
+        assert best.shift_hours == 5
+        assert best.correlation > 0.99
+        assert best.is_convincing
+
+    def test_finds_offsets_outside_a_dst_sized_range(self):
+        """The real answer was +5h; a range built for DST would have missed it."""
+        assert max(gb.CANDIDATE_SHIFTS_HOURS) >= 12
+        assert min(gb.CANDIDATE_SHIFTS_HOURS) <= -12
+
+    def test_correlation_separates_shifts_that_error_cannot(self):
+        """Why the metric is correlation and not mean absolute error.
+
+        Rounding Green Button to whole kWh leaves error nearly flat across
+        shifts -- on real data it moved only between 1.24 and 1.57 kWh while
+        correlation ranged 0.02 to 0.98.
+        """
+        wall = hourly_series(datetime(2026, 7, 1, 0), 24 * 10)
+        truth = gb.parse_export(build_export(wall, export_offset_hours=-4))
+        reference = self._series(list(truth.readings))
+        candidate = self._series(list(truth.readings), -3)
+        right = gb.score_alignment(candidate, reference, 3)
+        wrong = gb.score_alignment(candidate, reference, 2)
+        assert right.correlation > wrong.correlation
+
+    def test_aligned_series_scores_zero_shift(self):
+        wall = hourly_series(datetime(2026, 7, 1, 0), 24 * 10)
+        export = gb.parse_export(build_export(wall, export_offset_hours=-4))
+        series = self._series(list(export.readings))
+        best = gb.best_alignment(series, series)
         assert best is not None
         assert best.shift_hours == 0
-        assert best.mean_absolute_error_kwh == pytest.approx(0.0)
-
-    def test_one_hour_skew_is_detected(self):
-        ref = self._series(datetime(2026, 7, 1, 0), 96)
-        skewed = {k + timedelta(hours=1): v for k, v in ref.items()}
-        best = gb.best_hour_shift(skewed, ref)
-        assert best is not None
-        assert best.shift_hours == -1
+        assert best.correlation == pytest.approx(1.0)
 
     def test_insufficient_overlap_returns_none(self):
-        ref = self._series(datetime(2026, 7, 1, 0), 96)
-        tiny = self._series(datetime(2026, 7, 1, 0), 3)
-        assert gb.best_hour_shift(tiny, ref) is None
+        wall = hourly_series(datetime(2026, 7, 1, 0), 24 * 10)
+        export = gb.parse_export(build_export(wall, export_offset_hours=-4))
+        reference = self._series(list(export.readings))
+        tiny = dict(list(reference.items())[:3])
+        assert gb.best_alignment(tiny, reference) is None
 
     def test_no_overlap_at_all_returns_none(self):
-        ref = self._series(datetime(2026, 7, 1, 0), 96)
-        elsewhere = self._series(datetime(2025, 1, 1, 0), 96)
-        assert gb.best_hour_shift(elsewhere, ref) is None
+        a = gb.parse_export(
+            build_export(
+                hourly_series(datetime(2026, 7, 1, 0), 240), export_offset_hours=-4
+            )
+        )
+        b = gb.parse_export(
+            build_export(
+                hourly_series(datetime(2024, 7, 1, 0), 240), export_offset_hours=-4
+            )
+        )
+        assert (
+            gb.best_alignment(
+                self._series(list(a.readings)), self._series(list(b.readings))
+            )
+            is None
+        )
+
+    def test_unrelated_series_is_not_convincing(self):
+        """A best fit is not necessarily a good one."""
+        import math
+
+        base = datetime(2026, 7, 1, 0)
+        a = {
+            (base + timedelta(hours=i)).replace(tzinfo=NY).astimezone(UTC): float(
+                2 + (i % 5)
+            )
+            for i in range(240)
+        }
+        b = {k: 3.0 + math.sin(i) * 0.01 for i, k in enumerate(sorted(a))}
+        best = gb.best_alignment(a, b)
+        assert best is not None
+        assert not best.is_convincing
+
+    def test_shift_preserves_total_and_ordering(self):
+        wall = hourly_series(datetime(2026, 7, 1, 0), 48)
+        export = gb.parse_export(build_export(wall, export_offset_hours=-4))
+        shifted = gb.apply_shift(list(export.readings), 5)
+        assert sum(v for _, v in shifted) == pytest.approx(export.total_kwh)
+        assert [t for t, _ in shifted] == sorted(t for t, _ in shifted)
 
 
 class TestIncompleteTail:
@@ -330,8 +305,7 @@ class TestIncompleteTail:
         readings += [(datetime(2026, 8, 11, h), 0) for h in range(19)]
 
         export = gb.parse_export(build_export(readings, export_offset_hours=-4))
-        fixed = gb.realign_to_local(export.readings, -4)
-        trimmed = gb.drop_incomplete_tail(fixed)
+        trimmed = gb.drop_incomplete_tail(list(export.readings))
 
         days = {dt.astimezone(NY).date() for dt, _ in trimmed}
         assert max(days).isoformat() == "2026-08-09"
@@ -339,7 +313,7 @@ class TestIncompleteTail:
     def test_complete_final_day_is_kept(self):
         readings = [(datetime(2026, 8, 9, h), 3) for h in range(24)]
         export = gb.parse_export(build_export(readings, export_offset_hours=-4))
-        trimmed = gb.drop_incomplete_tail(gb.realign_to_local(export.readings, -4))
+        trimmed = gb.drop_incomplete_tail(list(export.readings))
         assert len({dt.astimezone(NY).date() for dt, _ in trimmed}) == 1
 
     def test_interior_zero_day_is_not_dropped(self):
@@ -348,14 +322,14 @@ class TestIncompleteTail:
         readings += [(datetime(2026, 8, 9, h), 0) for h in range(24)]
         readings += [(datetime(2026, 8, 10, h), 3) for h in range(24)]
         export = gb.parse_export(build_export(readings, export_offset_hours=-4))
-        trimmed = gb.drop_incomplete_tail(gb.realign_to_local(export.readings, -4))
+        trimmed = gb.drop_incomplete_tail(list(export.readings))
         days = {dt.astimezone(NY).date() for dt, _ in trimmed}
         assert len(days) == 3
 
     def test_all_zero_export_yields_nothing(self):
         readings = [(datetime(2026, 8, 9, h), 0) for h in range(24)]
         export = gb.parse_export(build_export(readings, export_offset_hours=-4))
-        assert gb.drop_incomplete_tail(gb.realign_to_local(export.readings, -4)) == []
+        assert gb.drop_incomplete_tail(list(export.readings)) == []
 
 
 class TestMerge:

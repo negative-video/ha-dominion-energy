@@ -8,16 +8,22 @@ well past what the API alone can reach.
 
 Two properties of Dominion's export shape everything here:
 
-**The timestamps are not trustworthy as recorded.** Comparing two exports of
-the same account taken in different DST regimes, every reading in the later
-(EDT) export is stamped exactly one hour earlier than the same reading in the
-earlier (EST) one -- a 99.5% match under a one hour shift. The evidence is
-consistent with a single UTC offset, whichever was in effect when the customer
-clicked export, being applied to all thirteen months. So roughly half of any
-given export is off by an hour. :func:`realign_to_local` undoes that by
-recovering the intended wall-clock reading and re-localising it with real DST
-rules; :func:`best_hour_shift` verifies the result against known-good data
-rather than trusting the reconstruction blindly.
+**The timestamps are wrong by a constant, and the constant is not knowable
+from the file.** Measured against the utility's own 30-minute API readings, an
+August export needed +5 hours -- the *standard* time offset, applied to a
+daylight-time reading. Dominion appears to convert each reading to Eastern
+Standard Time year-round and serialise that as an epoch labelled UTC. The
+offset is constant within a file (a uniform one-hour shift matched two
+different exports at 99.5% across a DST boundary), but differs between files
+depending on when the export was taken.
+
+So the correction is not derivable from the file, and modelling it is a trap:
+an earlier attempt to reconstruct the intended wall clock and re-localise it
+with real DST rules made two exports agree with each other perfectly while
+leaving both five hours from the truth. Agreement between exports proves
+nothing. :func:`best_alignment` therefore *measures* the offset against data
+known to be correct, and the import refuses to proceed without a convincing
+fit.
 
 **The values are coarse.** Readings are whole kWh (``uom`` 72 with
 ``powerOfTenMultiplier`` 3), against two decimal places of 30-minute data from
@@ -30,7 +36,7 @@ This module imports no Home Assistant, so all of the above is unit testable.
 from __future__ import annotations
 
 from collections import defaultdict
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 import logging
@@ -54,9 +60,19 @@ DOMINION_TZ = ZoneInfo("America/New_York")
 # final day is routinely partial and must not be written as real data.
 MIN_COMPLETE_DAY_LAST_HOUR = 22
 
-# Candidate whole-hour corrections tried when validating against reference
-# data. Dominion's error is a DST offset, so +/- 2 hours is ample.
-CANDIDATE_SHIFTS_HOURS = (-2, -1, 0, 1, 2)
+# Whole-hour corrections tried when calibrating against reference data. The
+# observed error was +5 hours, so a range that only covered a DST-sized
+# mistake would have missed it entirely; this spans every plausible timezone
+# confusion in both directions.
+CANDIDATE_SHIFTS_HOURS = tuple(range(-14, 15))
+
+# Below this many overlapping hours a fit is not worth believing.
+MIN_OVERLAP_HOURS = 48
+
+# Correlation required before an import is allowed to write history. Real data
+# scores 0.98 at the right shift and below 0.65 at every wrong one, so this sits
+# well clear of both.
+MIN_CORRELATION = 0.85
 
 
 class GreenButtonError(Exception):
@@ -232,75 +248,6 @@ def parse_export(data: bytes | str) -> GreenButtonExport:
     )
 
 
-def export_offset_hours(
-    exported_at: datetime | None, tz: ZoneInfo = DOMINION_TZ
-) -> int:
-    """Return the UTC offset, in hours, in effect when the export was made.
-
-    This is the offset Dominion appears to have applied to every reading in the
-    file regardless of the reading's own date. Defaults to standard time when
-    the export carries no timestamp, which is the conservative choice: it is
-    the offset in effect for the larger part of the year.
-    """
-    if exported_at is None:
-        # No export timestamp: assume standard time, which is in effect for the
-        # larger part of the year. best_hour_shift is what actually catches a
-        # wrong guess, so this only decides which way we lean first.
-        offset = datetime(2000, 1, 15, tzinfo=tz).utcoffset()
-    else:
-        offset = exported_at.astimezone(tz).utcoffset()
-    if offset is None:  # pragma: no cover - ZoneInfo always supplies one
-        return -5
-    return int(offset.total_seconds() // 3600)
-
-
-def realign_to_local(
-    readings: tuple[tuple[datetime, float], ...],
-    offset_hours: int,
-    tz: ZoneInfo = DOMINION_TZ,
-) -> list[tuple[datetime, float]]:
-    """Correct timestamps that were built with a single fixed UTC offset.
-
-    Recovers the wall-clock time Dominion meant -- ``recorded + offset`` -- and
-    re-localises it with real DST rules. Readings whose date falls in the same
-    DST regime as the export come back unchanged; the rest move by an hour,
-    which is precisely the discrepancy observed between two exports of the same
-    account taken in different seasons.
-
-    Non-existent local times (the skipped hour at spring forward) are dropped:
-    they denote no real instant, and Dominion's own export simply omits that
-    hour. Ambiguous times (the repeated hour at fall back) resolve to the first
-    occurrence, since the export carries only one reading for it.
-
-    Args:
-        readings: ``(start, kwh)`` pairs exactly as recorded.
-        offset_hours: The offset the file was built with, from
-            :func:`export_offset_hours`.
-        tz: The utility's timezone.
-
-    Returns:
-        ``(start, kwh)`` pairs in true UTC, sorted, with duplicates summed.
-    """
-    corrected: dict[datetime, float] = {}
-    dropped = 0
-
-    for recorded, kwh in readings:
-        wall = (recorded + timedelta(hours=offset_hours)).replace(tzinfo=None)
-        localised = wall.replace(tzinfo=tz)
-        # A local time inside the spring-forward gap does not round-trip.
-        if localised.astimezone(UTC).astimezone(tz).replace(tzinfo=None) != wall:
-            dropped += 1
-            continue
-        as_utc = localised.astimezone(UTC)
-        corrected[as_utc] = corrected.get(as_utc, 0.0) + kwh
-
-    if dropped:
-        _LOGGER.debug(
-            "Dropped %d Green Button reading(s) falling in a DST gap", dropped
-        )
-    return sorted(corrected.items())
-
-
 def to_hourly(readings: list[tuple[datetime, float]]) -> dict[datetime, float]:
     """Bucket readings into whole UTC hours.
 
@@ -314,57 +261,107 @@ def to_hourly(readings: list[tuple[datetime, float]]) -> dict[datetime, float]:
 
 
 @dataclass(frozen=True)
-class ShiftScore:
-    """How well a candidate hour shift lines a series up with a reference."""
+class AlignmentScore:
+    """How well a candidate series lines up with a reference under a shift."""
 
     shift_hours: int
     overlapping_hours: int
+    correlation: float
     mean_absolute_error_kwh: float
 
     @property
     def is_usable(self) -> bool:
         """Whether enough hours overlapped for the score to mean anything."""
-        return self.overlapping_hours >= 24
+        return self.overlapping_hours >= MIN_OVERLAP_HOURS
+
+    @property
+    def is_convincing(self) -> bool:
+        """Whether this fit is good enough to write history on."""
+        return self.is_usable and self.correlation >= MIN_CORRELATION
 
 
-def score_shift(
+def _pearson(pairs: list[tuple[float, float]]) -> float:
+    """Return Pearson's r, or 0.0 when either series is flat."""
+    n = len(pairs)
+    if n < 2:
+        return 0.0
+    mean_a = sum(a for a, _ in pairs) / n
+    mean_b = sum(b for _, b in pairs) / n
+    cov = sum((a - mean_a) * (b - mean_b) for a, b in pairs) / n
+    sd_a = (sum((a - mean_a) ** 2 for a, _ in pairs) / n) ** 0.5
+    sd_b = (sum((b - mean_b) ** 2 for _, b in pairs) / n) ** 0.5
+    if not sd_a or not sd_b:
+        return 0.0
+    return cov / (sd_a * sd_b)
+
+
+def apply_shift(
+    readings: Sequence[tuple[datetime, float]], hours: int
+) -> list[tuple[datetime, float]]:
+    """Shift every reading by a whole number of hours.
+
+    The correction is uniform: Dominion's offset is constant within an export,
+    so re-localising per reading would introduce a DST-shaped error that is not
+    actually there.
+    """
+    delta = timedelta(hours=hours)
+    return [(start + delta, kwh) for start, kwh in readings]
+
+
+def score_alignment(
     candidate: dict[datetime, float],
     reference: dict[datetime, float],
     shift_hours: int,
-) -> ShiftScore:
-    """Score one candidate shift against reference data."""
+) -> AlignmentScore:
+    """Score one candidate shift against reference data.
+
+    Correlation rather than error magnitude decides the fit. Green Button
+    readings are whole kWh against the API's two decimal places, which leaves
+    mean absolute error nearly flat across shifts -- on real data it varied
+    only between 1.24 and 1.57 kWh while correlation ranged from 0.02 to 0.98
+    and picked the right answer unambiguously. The error is still reported,
+    because it is the useful number for judging *quality* once the shift is
+    known.
+    """
     delta = timedelta(hours=shift_hours)
-    errors: list[float] = []
-    for hour, value in candidate.items():
-        ref = reference.get(hour + delta)
-        if ref is not None:
-            errors.append(abs(value - ref))
-    if not errors:
-        return ShiftScore(shift_hours, 0, float("inf"))
-    return ShiftScore(shift_hours, len(errors), sum(errors) / len(errors))
+    pairs = [
+        (value, reference[hour + delta])
+        for hour, value in candidate.items()
+        if hour + delta in reference
+    ]
+    if not pairs:
+        return AlignmentScore(shift_hours, 0, 0.0, float("inf"))
+    mae = sum(abs(a - b) for a, b in pairs) / len(pairs)
+    return AlignmentScore(shift_hours, len(pairs), _pearson(pairs), mae)
 
 
-def best_hour_shift(
+def best_alignment(
     candidate: dict[datetime, float],
     reference: dict[datetime, float],
-    shifts: tuple[int, ...] = CANDIDATE_SHIFTS_HOURS,
-) -> ShiftScore | None:
+    shifts: Iterable[int] = CANDIDATE_SHIFTS_HOURS,
+) -> AlignmentScore | None:
     """Find the whole-hour shift that best matches ``reference``.
 
-    Used to verify :func:`realign_to_local` against data known to be correct --
-    the API's own 30-minute readings for the window the two sources share. A
-    result of 0 confirms the reconstruction; anything else means the assumption
-    about Dominion's offset is wrong for this file and the import should stop
-    rather than write history that is silently an hour out.
-
-    Returns:
-        The best-scoring shift, or None if nothing overlapped enough to judge.
+    Returns the best-scoring shift, or None if nothing overlapped enough to
+    judge. Callers must check :attr:`AlignmentScore.is_convincing` before
+    trusting the result -- a best fit is not necessarily a good one.
     """
-    scored = [score_shift(candidate, reference, s) for s in shifts]
+    scored = [score_alignment(candidate, reference, s) for s in shifts]
     usable = [s for s in scored if s.is_usable]
     if not usable:
         return None
-    return min(usable, key=lambda s: s.mean_absolute_error_kwh)
+    # Correlation decides, but a load profile is periodic enough that two
+    # shifts can score within floating-point noise of each other. Break such
+    # ties on error, then on the smaller correction -- the candidate range is
+    # deliberately narrower than 24 hours so a whole-day alias cannot win.
+    return max(
+        usable,
+        key=lambda s: (
+            round(s.correlation, 6),
+            -s.mean_absolute_error_kwh,
+            -abs(s.shift_hours),
+        ),
+    )
 
 
 def drop_incomplete_tail(

@@ -199,7 +199,11 @@ Pass several files to merge them; later ones win on any hour they share. Drop `d
 
 ### What it does, and why it isn't a straight copy
 
-**Dominion's timestamps can't be taken at face value.** Every reading in an export is stamped with whichever UTC offset was in effect *when you clicked export*, not the offset that applied to the reading. Two exports of the same account taken in different seasons place the same hour an hour apart. The importer recovers the intended wall-clock time and re-localises it with real DST rules, then **verifies the result against the API's own readings** for the window they share. If they don't line up it refuses the import rather than writing history that is silently an hour skewed.
+**Dominion's timestamps are wrong by a constant, and the file doesn't say by how much.** Measured against the utility's own API readings, one August export was out by **+5 hours** and a February one by **+4**. The offset is constant within a file but varies between exports, and nothing in the file predicts it.
+
+So the importer **measures** the offset rather than guessing: it correlates each export against data known to be correctly stamped, and only proceeds when the fit is convincing. An export that doesn't reach the API's recent window is calibrated against another export in the same call that does — so pass old and new files together. If nothing fits, the import is refused rather than writing history that is silently hours out.
+
+> This is worth stressing because the obvious sanity check doesn't work: two exports can be made to agree with each other perfectly while *both* are five hours from the truth. Only comparison against independently-correct data catches it.
 
 **The API wins where both cover an hour.** Green Button is whole-kWh and hourly; the API is two decimal places and half-hourly. Green Button only fills in what the API cannot reach.
 

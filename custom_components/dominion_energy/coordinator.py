@@ -72,13 +72,13 @@ from .const import (
     UPDATE_INTERVAL_MINUTES,
 )
 from .green_button import (
+    MIN_CORRELATION,
     GreenButtonExport,
-    best_hour_shift,
+    apply_shift,
+    best_alignment,
     drop_incomplete_tail,
-    export_offset_hours,
     merge_preferring,
     parse_export,
-    realign_to_local,
     to_hourly,
 )
 from .rates import (
@@ -1847,35 +1847,8 @@ class DominionEnergyCoordinator(DataUpdateCoordinator[DominionEnergyData]):
         parsed = await self.hass.async_add_executor_job(
             _load_green_button_files, file_paths
         )
-        imported: dict[datetime, float] = {}
-        sources: list[dict[str, Any]] = []
-        for path, export in parsed:
-            offset = export_offset_hours(export.exported_at)
-            realigned = realign_to_local(export.readings, offset)
-            trimmed = drop_incomplete_tail(realigned)
-            hourly = to_hourly(trimmed)
-            # Later exports supersede earlier ones on any shared hour: the
-            # billing profile can restate a reading after a meter re-read.
-            imported.update(hourly)
-            sources.append(
-                {
-                    "path": path,
-                    "readings": len(export.readings),
-                    "assumed_utc_offset_hours": offset,
-                    "hours_after_trim": len(hourly),
-                    "first_hour": min(hourly).isoformat() if hourly else None,
-                    "last_hour": max(hourly).isoformat() if hourly else None,
-                    "total_kwh": round(sum(hourly.values()), 3),
-                }
-            )
-
-        if not imported:
-            raise HomeAssistantError(
-                "No usable readings found in the supplied Green Button export(s)"
-            )
-
-        # Reference data for the alignment check: the API window overlapping
-        # the import. This is the only data we know to be correctly stamped.
+        # Reference data: the API window, which is the only series we know to be
+        # correctly stamped. Every export is calibrated against it.
         start_date, end_date = self._backfill_window(dt_util.now().date())
         reference_intervals = await self._client.async_get_interval_usage(
             account_number=self.config_entry.data[CONF_ACCOUNT_NUMBER],
@@ -1884,8 +1857,6 @@ class DominionEnergyCoordinator(DataUpdateCoordinator[DominionEnergyData]):
             end_date=end_date,
         )
         reference_intervals, _dropped = filter_incomplete_days(reference_intervals)
-        # Only consumption matters for the alignment check, so bucket directly
-        # rather than going through aggregate_hourly and costing data twice.
         reference_local: dict[datetime, float] = {}
         for interval in reference_intervals:
             hour = interval.timestamp.replace(minute=0, second=0, microsecond=0)
@@ -1895,19 +1866,83 @@ class DominionEnergyCoordinator(DataUpdateCoordinator[DominionEnergyData]):
         reference_hourly = {
             dt_util.as_utc(hour): value for hour, value in reference_local.items()
         }
-
-        alignment = best_hour_shift(imported, reference_hourly)
-        if alignment is None:
+        if not reference_hourly:
             raise HomeAssistantError(
-                "Green Button export does not overlap the API's data window by "
-                "enough hours to verify its timestamps. Export a fresher file."
+                "No API data available to calibrate the import against. Let the "
+                "integration finish its initial backfill and try again."
             )
-        if alignment.shift_hours != 0:
+
+        # Each export carries a constant but unknowable timestamp offset, so it
+        # is measured rather than modelled. A file that does not reach the API
+        # window is calibrated against an already-calibrated export instead --
+        # two exports overlap heavily, so the chain holds.
+        imported: dict[datetime, float] = {}
+        sources: list[dict[str, Any]] = []
+        pending = list(parsed)
+        calibrated_against = "API"
+
+        while pending:
+            progressed = False
+            for entry_index, (path, export) in enumerate(pending):
+                raw_hourly = to_hourly(drop_incomplete_tail(list(export.readings)))
+                against = (
+                    reference_hourly
+                    if not imported
+                    else {
+                        **imported,
+                        **reference_hourly,
+                    }
+                )
+                alignment = best_alignment(raw_hourly, against)
+                if alignment is None or not alignment.is_convincing:
+                    continue
+
+                shifted = to_hourly(
+                    apply_shift(
+                        drop_incomplete_tail(list(export.readings)),
+                        alignment.shift_hours,
+                    )
+                )
+                imported.update(shifted)
+                sources.append(
+                    {
+                        "path": path,
+                        "readings": len(export.readings),
+                        "measured_shift_hours": alignment.shift_hours,
+                        "calibrated_against": calibrated_against,
+                        "correlation": round(alignment.correlation, 4),
+                        "compared_hours": alignment.overlapping_hours,
+                        "mean_absolute_error_kwh": round(
+                            alignment.mean_absolute_error_kwh, 3
+                        ),
+                        "hours_after_trim": len(shifted),
+                        "first_hour": min(shifted).isoformat() if shifted else None,
+                        "last_hour": max(shifted).isoformat() if shifted else None,
+                        "total_kwh": round(sum(shifted.values()), 3),
+                    }
+                )
+                pending.pop(entry_index)
+                calibrated_against = "an already-calibrated export"
+                progressed = True
+                break
+
+            if not progressed:
+                unmatched = ", ".join(path for path, _ in pending)
+                raise HomeAssistantError(
+                    f"Could not verify the timestamps of: {unmatched}. Every "
+                    "Green Button export is stamped with a constant but "
+                    f"unpredictable offset, so it is measured against known-good "
+                    f"data and must reach at least {MIN_CORRELATION:.2f} "
+                    "correlation. No shift fit well enough, which usually means "
+                    "the export does not overlap either the API's recent window "
+                    "or another export being imported alongside it. Try a "
+                    "freshly downloaded export, and include it in the same call "
+                    "as any older ones."
+                )
+
+        if not imported:
             raise HomeAssistantError(
-                f"Green Button timestamps look {alignment.shift_hours:+d}h out "
-                f"against the API over {alignment.overlapping_hours} shared "
-                "hours, so the export was not realigned correctly and the "
-                "import was refused. Please report this with the export's date."
+                "No usable readings found in the supplied Green Button export(s)"
             )
 
         merged = merge_preferring(reference_hourly, imported)
@@ -1915,13 +1950,10 @@ class DominionEnergyCoordinator(DataUpdateCoordinator[DominionEnergyData]):
             self.config_entry.options.get(CONF_COST_MODE, COST_MODE_API)
         )
 
+        # Per-file calibration results live in `sources`; there is no single
+        # alignment figure, because each export carries its own offset.
         summary: dict[str, Any] = {
             "sources": sources,
-            "alignment": {
-                "shift_hours": alignment.shift_hours,
-                "compared_hours": alignment.overlapping_hours,
-                "mean_absolute_error_kwh": round(alignment.mean_absolute_error_kwh, 4),
-            },
             "hours_imported": len(imported),
             "hours_from_api": len(reference_hourly),
             "hours_total": len(merged),
