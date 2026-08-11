@@ -179,6 +179,9 @@
       "projected_period_cost": {
         "name": "Projected billing period cost"
       },
+      "peak_usage_hour": {
+        "name": "Busiest hour"
+      },
       "billing_period_start": {
         "name": "Billing period start"
       },

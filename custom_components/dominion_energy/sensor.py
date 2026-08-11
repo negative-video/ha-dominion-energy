@@ -195,6 +195,16 @@ SENSORS: tuple[DominionEnergySensorDescription, ...] = (
         suggested_display_precision=2,
         value_fn=lambda data: data.projected_period_cost,
     ),
+    # When the house actually uses its electricity. The state is the hour
+    # spelled the way a person says it ("6 PM") rather than 0-23, because the
+    # point of the sensor is to be readable at a glance on a dashboard; the
+    # numeric hour and the full 24-hour shape ride along as attributes for
+    # templates and charts.
+    DominionEnergySensorDescription(
+        key="peak_usage_hour",
+        translation_key="peak_usage_hour",
+        value_fn=lambda data: data.profile.peak_label if data.profile else None,
+    ),
     # New bill forecast sensors - Diagnostic
     DominionEnergySensorDescription(
         key="billing_period_start",
@@ -534,6 +544,21 @@ class DominionEnergySensor(CoordinatorEntity[DominionEnergyCoordinator], SensorE
         if key == "rate_check_drift":
             attrs["estimated"] = data.rate_check_estimated
             attrs["actual"] = data.rate_check_actual
+
+        # The shape behind the headline hour. `hourly_average_kwh` is a plain
+        # 24-element list indexed by hour so a chart card can read it directly.
+        if key == "peak_usage_hour" and data.profile is not None:
+            profile = data.profile
+            attrs["peak_hour"] = profile.peak_hour
+            attrs["peak_hour_average_kwh"] = profile.peak_average
+            attrs["quietest_hour"] = profile.quietest_hour
+            attrs["quietest_hour_label"] = profile.quietest_label
+            attrs["quietest_hour_average_kwh"] = profile.quietest_average
+            attrs["average_daily_kwh"] = profile.average_daily_kwh
+            attrs["hourly_average_kwh"] = profile.hourly_average
+            attrs["days_averaged"] = profile.days
+            attrs["first_day"] = profile.first_day.isoformat()
+            attrs["last_day"] = profile.last_day.isoformat()
 
         # Where the projected bill actually goes. Six components rather than
         # six more entities: nobody puts "transmission charges" on a dashboard,

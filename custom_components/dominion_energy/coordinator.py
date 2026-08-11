@@ -84,6 +84,7 @@ from .green_button import (
     parse_export,
     to_hourly,
 )
+from .insights import UsageProfile, usage_profile
 from .rates import (
     VA_SCHEDULE_1_HISTORY,
     PeriodBill,
@@ -382,6 +383,10 @@ class DominionEnergyData:
     period_to_date_cost: float | None = None
     projected_period_usage: float | None = None
     projected_period_cost: float | None = None
+
+    # The average shape of a day over the trailing profile window. None until
+    # enough complete days have accumulated to average.
+    profile: UsageProfile | None = None
 
     # The projected billing period priced by the Schedule 1 tariff, broken out
     # by component. Always the full tariff regardless of the configured cost
@@ -758,6 +763,11 @@ class DominionEnergyCoordinator(DataUpdateCoordinator[DominionEnergyData]):
 
             projected_bill = self._projected_bill(projected_period_usage, bill_forecast)
 
+            # Built from the whole fetched window, not the month or period
+            # slices: the API returns its full ~68 day workbook whatever range
+            # was asked for, so the history is free and already in hand.
+            profile = usage_profile(window_intervals, through=yesterday)
+
             (
                 rate_check_estimated,
                 rate_check_actual,
@@ -798,6 +808,7 @@ class DominionEnergyCoordinator(DataUpdateCoordinator[DominionEnergyData]):
                 projected_period_usage=projected_period_usage,
                 projected_period_cost=projected_period_cost,
                 projected_bill=projected_bill,
+                profile=profile,
                 rate_check_estimated=rate_check_estimated,
                 rate_check_actual=rate_check_actual,
                 rate_check_discrepancy=rate_check_discrepancy,
