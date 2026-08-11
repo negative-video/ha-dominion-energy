@@ -24,6 +24,7 @@ from .const import (
     CONF_PASSWORD,
     CONF_REFRESH_TOKEN,
     CONF_SERVICE_ADDRESS,
+    CONF_STATISTIC_ID_PREFIX,
     CONF_USERNAME,
     COST_MODE_API,
 )
@@ -334,10 +335,16 @@ async def async_get_config_entry_diagnostics(
     """Return diagnostics for a config entry."""
     coordinator = getattr(entry, "runtime_data", None)
 
+    # Statistic IDs are built from CONF_STATISTIC_ID_PREFIX, which is
+    # meter-scoped for entries added since that scheme landed and account-scoped
+    # only for installs that already owned account-scoped history. Querying the
+    # account number alone reports has_statistics=False on every new install.
     has_statistics: bool | None = None
-    account_number = entry.data.get(CONF_ACCOUNT_NUMBER)
-    if account_number:
-        has_statistics = await _async_has_statistics(hass, str(account_number))
+    prefix = entry.data.get(CONF_STATISTIC_ID_PREFIX) or entry.data.get(
+        CONF_ACCOUNT_NUMBER
+    )
+    if prefix:
+        has_statistics = await _async_has_statistics(hass, str(prefix))
 
     return build_diagnostics(
         entry_data=entry.data,
@@ -358,9 +365,9 @@ async def async_get_config_entry_diagnostics(
 
 
 async def _async_has_statistics(
-    hass: HomeAssistant, account_number: str
+    hass: HomeAssistant, statistic_id_prefix: str
 ) -> bool | None:
-    """Report whether external statistics have been written for this account.
+    """Report whether external statistics have been written for this entry.
 
     Returns None if the recorder cannot be queried, so a recorder problem is
     distinguishable from genuinely absent statistics.
@@ -373,7 +380,7 @@ async def _async_has_statistics(
 
         from .const import DOMAIN
 
-        statistic_id = f"{DOMAIN}:{account_number}_energy_consumption"
+        statistic_id = f"{DOMAIN}:{statistic_id_prefix}_energy_consumption"
         last_stat = await get_instance(hass).async_add_executor_job(
             get_last_statistics, hass, 1, statistic_id, True, {"sum"}
         )

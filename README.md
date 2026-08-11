@@ -140,7 +140,9 @@ This integration provides **external statistics** for the Home Assistant Energy 
 | `dominion_energy:{prefix}_energy_cost` | Cumulative energy cost (uses configured cost mode) |
 | `dominion_energy:{prefix}_energy_generation` | Cumulative excess generation (kWh) — only created once the meter reports export |
 
-`{prefix}` is your account number for the first meter on an account, so existing installations keep the statistic IDs and history they already have. A second meter added on the same account uses `{account}_{meter}` instead, so the two never write into the same stream.
+`{prefix}` is `{account_number}_{meter_device_id}` for any entry added since this scheme landed, so two meters on one account can never write into the same stream. Installations that already had account-scoped statistics keep using the bare account number, because external statistics cannot be renamed in place and changing the ID would orphan their history.
+
+The exact IDs are easiest to find by searching for "dominion" in the Energy Dashboard's statistic picker rather than typing them out. The `statistic_id_prefix` in the diagnostics download also shows the resolved value.
 
 To add generation to the Energy Dashboard, use **Add solar production** rather than **Add consumption**.
 
