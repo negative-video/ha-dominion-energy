@@ -20,7 +20,7 @@ from homeassistant.helpers import config_validation as cv
 
 from .const import CONF_ACCOUNT_NUMBER, CONF_METER_NUMBER, DOMAIN
 from .coordinator import DominionEnergyConfigEntry, DominionEnergyCoordinator
-from .green_button import GreenButtonError
+from .green_button import GreenButtonError, describe_path_problem
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -82,16 +82,8 @@ def _async_register_services(hass: HomeAssistant) -> None:
             # guessing, and note that add-ons see the config directory as
             # /homeassistant while this runs in Core, where it is /config.
             if not hass.config.is_allowed_path(path):
-                allowed = ", ".join(sorted(hass.config.allowlist_external_dirs))
                 raise HomeAssistantError(
-                    f"Path {path} is not allowed. Home Assistant can only read "
-                    f"from: {allowed}. Move the export into one of those (the "
-                    "media directory keeps it private; files under www are "
-                    "served publicly at /local/ without authentication), or add "
-                    "its directory to allowlist_external_dirs in "
-                    "configuration.yaml and restart. Note that add-ons show the "
-                    "config directory as /homeassistant, but this service runs "
-                    "in Home Assistant Core where the same directory is /config."
+                    describe_path_problem(path, hass.config.allowlist_external_dirs)
                 )
 
         coordinator: DominionEnergyCoordinator = entry.runtime_data
@@ -102,6 +94,16 @@ def _async_register_services(hass: HomeAssistant) -> None:
         except GreenButtonError as err:
             raise HomeAssistantError(
                 f"Could not read Green Button export: {err}"
+            ) from err
+        except FileNotFoundError as err:
+            # The path passed the allowlist, so this is a real typo or a file
+            # left in a similarly-named directory -- /config/media and /media
+            # being the classic pair.
+            raise HomeAssistantError(
+                f"Could not open Green Button export: {err}. The directory is "
+                "readable, so check the file is actually there and that the "
+                "name matches exactly. Note /media and /config/media are "
+                "different directories."
             ) from err
         except OSError as err:
             raise HomeAssistantError(

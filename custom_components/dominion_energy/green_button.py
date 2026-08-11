@@ -30,6 +30,7 @@ This module imports no Home Assistant, so all of the above is unit testable.
 from __future__ import annotations
 
 from collections import defaultdict
+from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 import logging
@@ -398,6 +399,60 @@ def drop_incomplete_tail(
     if keep_through is None:
         return []
     return [r for r in readings if r[0].astimezone(tz).date() <= keep_through]
+
+
+def describe_path_problem(path: str, allowed_dirs: Iterable[str]) -> str:
+    """Explain why Home Assistant refused to read ``path``.
+
+    Lives here rather than in the service handler so it can be unit tested
+    without Home Assistant.
+
+    Two traps account for essentially every failed attempt, and a bare list of
+    allowed directories helps with neither:
+
+    - **Add-on paths.** File Editor, Samba and Terminal mount the config
+      directory as ``/homeassistant``. Services run in Core, which knows the
+      same directory as ``/config``.
+    - **Two directories named "media".** Home Assistant OS provides ``/media``
+      as its own top-level mount, and that is what the allowlist contains. A
+      ``media`` folder *inside* the config directory is a different place
+      entirely, is not on the allowlist, and looks identical in a file browser.
+    """
+    allowed = sorted(allowed_dirs)
+    lines = [
+        f"Path {path} is not allowed.",
+        f"Home Assistant can only read from: {', '.join(allowed) or '(none)'}.",
+    ]
+
+    if path.startswith("/homeassistant/"):
+        core_path = path.replace("/homeassistant/", "/config/", 1)
+        lines.append(
+            "That looks like an add-on path: File Editor, Samba and Terminal "
+            "show the config directory as /homeassistant, but this service "
+            f"runs in Home Assistant Core, where it is /config. Try {core_path} "
+            "-- though note the config directory is not readable by default "
+            "either; see below."
+        )
+
+    normalised = path.replace("/homeassistant/", "/config/", 1)
+    if normalised.startswith("/config/media/"):
+        lines.append(
+            "Careful: /config/media and /media are different directories. Only "
+            "the top-level /media is on the allowlist -- it is its own mount, a "
+            "sibling of /config, and in Samba it is a separate share rather "
+            "than a folder inside config. A 'media' folder inside the config "
+            "directory is not the same place and is not readable."
+        )
+
+    lines.append(
+        "Either move the file into one of the allowed directories (/media "
+        "keeps it private; anything under www is served publicly at /local/ "
+        "with no authentication, and an export contains your account number "
+        "and an hourly record of when your home is occupied), or add its "
+        "directory to allowlist_external_dirs in configuration.yaml and "
+        "restart."
+    )
+    return " ".join(lines)
 
 
 def merge_preferring(

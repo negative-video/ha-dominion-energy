@@ -379,3 +379,55 @@ class TestMerge:
         gb.merge_preferring(preferred, fallback)
         assert preferred == {a: 1.0}
         assert fallback == {a: 2.0}
+
+
+class TestPathGuidance:
+    """The message shown when Home Assistant refuses to read a file.
+
+    Two traps account for essentially every failed attempt, and both are
+    invisible in a file browser: add-ons mount the config directory as
+    /homeassistant while Core sees /config, and Home Assistant OS has a
+    top-level /media that is a completely different place from a `media`
+    folder inside the config directory. A bare list of allowed directories
+    helps with neither, so the message names them explicitly.
+    """
+
+    ALLOWED = ["/media", "/config/www"]
+
+    def test_always_lists_the_allowed_directories(self):
+        message = gb.describe_path_problem("/tmp/x.xml", self.ALLOWED)
+        assert "/media" in message
+        assert "/config/www" in message
+
+    def test_addon_path_is_translated_to_the_core_path(self):
+        message = gb.describe_path_problem(
+            "/homeassistant/greenbutton/export.xml", self.ALLOWED
+        )
+        assert "/config/greenbutton/export.xml" in message
+        assert "add-on" in message.lower()
+
+    def test_config_media_collision_is_called_out(self):
+        message = gb.describe_path_problem(
+            "/config/media/greenbutton/export.xml", self.ALLOWED
+        )
+        assert "/config/media and /media are different directories" in message
+
+    def test_collision_is_caught_through_the_addon_path_too(self):
+        """The way it actually presents: an add-on path into config/media."""
+        message = gb.describe_path_problem(
+            "/homeassistant/media/greenbutton/export.xml", self.ALLOWED
+        )
+        assert "/config/media and /media are different directories" in message
+
+    def test_real_media_path_does_not_trigger_the_collision_note(self):
+        message = gb.describe_path_problem("/media/greenbutton/x.xml", self.ALLOWED)
+        assert "different directories" not in message
+
+    def test_warns_that_www_is_publicly_served(self):
+        message = gb.describe_path_problem("/tmp/x.xml", self.ALLOWED)
+        assert "/local/" in message
+        assert "no authentication" in message
+
+    def test_empty_allowlist_does_not_crash(self):
+        message = gb.describe_path_problem("/tmp/x.xml", [])
+        assert "(none)" in message

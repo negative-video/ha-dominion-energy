@@ -172,7 +172,14 @@ homeassistant:
     - /config/greenbutton
 ```
 
-> **Note**: add-ons such as File Editor, Samba and Terminal show your config directory as `/homeassistant`, but this service runs inside Home Assistant Core, where the same directory is `/config`. Use the Core path. If you get a "not allowed" error, it lists the directories that *are* readable.
+> **Two paths that catch almost everyone.** Both are invisible in a file browser:
+>
+> 1. **`/homeassistant` vs `/config`.** Add-ons like File Editor, Samba and Terminal mount your config directory as `/homeassistant`. This service runs in Home Assistant Core, which knows the same directory as `/config`. Always give the Core path.
+> 2. **`/media` vs `/config/media`.** Home Assistant OS provides `/media` as its own **top-level** mount — a sibling of `/config`, and in Samba a *separate share*, not a folder inside `config`. A `media` folder sitting inside your config directory is a different place, is not on the allowlist, and looks identical when browsing. Put the file in the top-level one, alongside directories like `llmvision` or `wyze`, not inside `config`.
+>
+> The "not allowed" error detects both cases and says which one you've hit.
+
+Also note that an XML file **will not appear in the Home Assistant media browser** — that only lists playable media. Its absence there doesn't mean it's in the wrong place.
 
 ### Running the import
 
