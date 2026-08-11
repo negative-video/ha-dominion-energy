@@ -7,19 +7,19 @@ import logging
 from typing import Any
 
 from dompower import (
+    AccountInfo,
+    ApiError,
+    CannotConnectError,
     DompowerClient,
     GigyaAuthenticator,
-    InvalidCredentialsError,
-    TFAVerificationError,
-    TFAExpiredError,
     GigyaError,
-    CannotConnectError,
-    TokenExpiredError,
     InvalidAuthError,
-    ApiError,
-    TFATarget,
-    AccountInfo,
+    InvalidCredentialsError,
     MeterDevice,
+    TFAExpiredError,
+    TFATarget,
+    TFAVerificationError,
+    TokenExpiredError,
 )
 import voluptuous as vol
 
@@ -79,10 +79,15 @@ STEP_TFA_CODE_SCHEMA = vol.Schema(
 )
 
 
+def _meter_suffix(device_id: str) -> str:
+    """Return a short, human readable suffix for a meter device ID."""
+    return device_id[-8:] if len(device_id) > 8 else device_id
+
+
 class DominionEnergyConfigFlow(ConfigFlow, domain=DOMAIN):
     """Handle a config flow for Dominion Energy."""
 
-    VERSION = 1
+    VERSION = 2
 
     def __init__(self) -> None:
         """Initialize the config flow."""
@@ -353,10 +358,7 @@ class DominionEnergyConfigFlow(ConfigFlow, domain=DOMAIN):
         for key, (account, meter) in self._account_meter_options.items():
             # Format: "123 Main St - Meter: ...117800"
             address = str(account.service_address)
-            meter_suffix = (
-                meter.device_id[-8:] if len(meter.device_id) > 8 else meter.device_id
-            )
-            label = f"{address} - Meter: ...{meter_suffix}"
+            label = f"{address} - Meter: ...{_meter_suffix(meter.device_id)}"
             options[key] = label
 
         return self.async_show_form(
@@ -374,8 +376,9 @@ class DominionEnergyConfigFlow(ConfigFlow, domain=DOMAIN):
         """Create or update config entry from the selected account/meter."""
         account, meter = self._account_meter_options[selection_key]
 
-        # Set unique ID
-        await self.async_set_unique_id(account.account_number)
+        # Set unique ID - an entry tracks a single meter, so the account number
+        # alone is not unique for customers with several meters on one account
+        await self.async_set_unique_id(f"{account.account_number}_{meter.device_id}")
 
         new_data = {
             CONF_USERNAME: self._username,
@@ -388,7 +391,12 @@ class DominionEnergyConfigFlow(ConfigFlow, domain=DOMAIN):
             CONF_SERVICE_ADDRESS: str(account.service_address),
         }
 
-        # Handle reconfigure flow - update existing entry
+        # Handle reconfigure flow - update existing entry.
+        # The unique ID is meter scoped, so selecting a different meter aborts
+        # instead of repointing the entry: entity unique IDs and the external
+        # statistics of the existing entry belong to the original meter, and
+        # swapping the meter underneath them would mix two meters' data.
+        # A different meter has to be added as its own entry.
         if self.source == SOURCE_RECONFIGURE:
             self._abort_if_unique_id_mismatch()
             return self.async_update_reload_and_abort(
@@ -399,8 +407,19 @@ class DominionEnergyConfigFlow(ConfigFlow, domain=DOMAIN):
         # New entry - check for duplicates
         self._abort_if_unique_id_configured()
 
+        # Disambiguate the title when the account has more than one meter,
+        # otherwise both entries would be named identically
+        meters_on_account = sum(
+            1
+            for candidate_account, _ in self._account_meter_options.values()
+            if candidate_account.account_number == account.account_number
+        )
+        title = f"Dominion Energy ({account.account_number})"
+        if meters_on_account > 1:
+            title = f"{title} - Meter ...{_meter_suffix(meter.device_id)}"
+
         return self.async_create_entry(
-            title=f"Dominion Energy ({account.account_number})",
+            title=title,
             data=new_data,
         )
 
