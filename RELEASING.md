@@ -2,7 +2,22 @@
 
 ## Overview
 
-Releases create a `dominion_energy.zip` asset attached to the GitHub release, which HACS uses to install the integration. The workflow is triggered by creating a GitHub release.
+Creating a GitHub release triggers the `Release` workflow, which attaches a `dominion_energy.zip` asset.
+
+**HACS does not use that asset.** Using it requires `zip_release` and `filename` keys in `hacs.json`, and this repo sets neither. HACS instead downloads the repository contents at the release tag and copies `custom_components/dominion_energy/`. The ZIP is currently decorative — for manual installation, or in case `hacs.json` gains those keys later.
+
+The practical consequence: **the version in `manifest.json` must be correct in the commit you tag.** The workflow rewrites the manifest inside its own checkout when building the ZIP, but never commits that back, so it has no effect on what HACS installs.
+
+### Why releases matter here
+
+Without any releases, HACS tracks the default branch and records the **commit SHA** as the installed version. It then builds its download URL as `archive/refs/heads/<version>.zip` — which resolves for a branch name but 404s for a SHA:
+
+```
+Got status code 404 when trying to download
+https://github.com/<owner>/ha-dominion-energy/archive/refs/heads/16f130d.zip
+```
+
+Tagged releases avoid this: HACS fetches `archive/refs/tags/vX.Y.Z.zip`, which resolves. Cut releases rather than relying on branch tracking.
 
 ## Steps
 
