@@ -76,12 +76,22 @@ def _async_register_services(hass: HomeAssistant) -> None:
         paths: list[str] = call.data[ATTR_FILE_PATH]
         for path in paths:
             # Home Assistant restricts which directories an integration may
-            # read, and this path comes straight from the caller.
+            # read, and this path comes straight from the caller. Note the
+            # config directory is *not* allowed by default -- only `www` and
+            # the media dirs are -- so report the real list rather than
+            # guessing, and note that add-ons see the config directory as
+            # /homeassistant while this runs in Core, where it is /config.
             if not hass.config.is_allowed_path(path):
+                allowed = ", ".join(sorted(hass.config.allowlist_external_dirs))
                 raise HomeAssistantError(
-                    f"Path {path} is not allowed. Put the export somewhere "
-                    "under your config directory, or add its directory to "
-                    "allowlist_external_dirs in configuration.yaml."
+                    f"Path {path} is not allowed. Home Assistant can only read "
+                    f"from: {allowed}. Move the export into one of those (the "
+                    "media directory keeps it private; files under www are "
+                    "served publicly at /local/ without authentication), or add "
+                    "its directory to allowlist_external_dirs in "
+                    "configuration.yaml and restart. Note that add-ons show the "
+                    "config directory as /homeassistant, but this service runs "
+                    "in Home Assistant Core where the same directory is /config."
                 )
 
         coordinator: DominionEnergyCoordinator = entry.runtime_data

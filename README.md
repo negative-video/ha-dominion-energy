@@ -162,7 +162,17 @@ The Dominion API only serves about **68 days** of interval data — it ignores t
 
 ### Getting the file
 
-Download the hourly Green Button XML from your Dominion Energy billing profile, and put it somewhere Home Assistant is allowed to read — `/config/` or a directory in `allowlist_external_dirs`. The window rolls forward, so a fresh export always reaches yesterday; keeping an old one lets you cover more history than either file alone.
+Download the hourly Green Button XML from your Dominion Energy billing profile. The window rolls forward, so a fresh export always reaches yesterday; keeping an older one lets you cover more history than either file alone.
+
+**Where to put it.** Home Assistant only reads from directories in `allowlist_external_dirs`, which by default is just your media directory and `config/www` — **the config directory itself is not allowed.** Put it under **`/media/`**: files in `www` are served publicly at `/local/` with no authentication, and a Green Button export contains your account number and a full hourly record of when your home is occupied. To use somewhere else:
+
+```yaml
+homeassistant:
+  allowlist_external_dirs:
+    - /config/greenbutton
+```
+
+> **Note**: add-ons such as File Editor, Samba and Terminal show your config directory as `/homeassistant`, but this service runs inside Home Assistant Core, where the same directory is `/config`. Use the Core path. If you get a "not allowed" error, it lists the directories that *are* readable.
 
 ### Running the import
 

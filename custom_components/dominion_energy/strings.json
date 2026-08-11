@@ -219,7 +219,7 @@
         },
         "file_path": {
           "name": "File path",
-          "description": "Full path to the Green Button XML file, which must be somewhere Home Assistant is allowed to read (under your config directory, or a directory listed in allowlist_external_dirs). Supply several paths to merge multiple exports; later files win on any hour they share."
+          "description": "Full path to the Green Button XML file. Home Assistant can only read from directories in allowlist_external_dirs - by default your media directory and config/www, NOT the config directory itself. Prefer /media/, since files under www are served publicly without authentication. Add-ons show the config directory as /homeassistant, but this runs in Core where it is /config. Supply several paths to merge multiple exports; later files win on any hour they share."
         },
         "dry_run": {
           "name": "Dry run",
