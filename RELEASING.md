@@ -27,9 +27,11 @@ Tagged releases avoid this: HACS fetches `archive/refs/tags/vX.Y.Z.zip`, which r
    - Bump `version` to the new version
    - Update `requirements` if the `dompower` dependency changed (ensure the new version is already published to PyPI)
 
+   Bump `version` in `pyproject.toml` to match. Nothing installs that package — it exists to carry the test and lint configuration — so a stale value breaks nothing, which is exactly why it silently fell two releases behind. Keep the two in step so neither has to be treated as the untrustworthy one.
+
 3. **Commit and push:**
    ```bash
-   git add custom_components/dominion_energy/manifest.json
+   git add custom_components/dominion_energy/manifest.json pyproject.toml
    git commit -m "Bump version to X.Y.Z"
    git push
    ```
@@ -40,7 +42,9 @@ Tagged releases avoid this: HACS fetches `archive/refs/tags/vX.Y.Z.zip`, which r
    ```bash
    gh release create vX.Y.Z --title "vX.Y.Z" --notes "Release notes here"
    ```
-   Or create via the GitHub UI at https://github.com/YeomansIII/ha-dominion-energy/releases/new.
+   Or create via the GitHub UI at `https://github.com/<owner>/ha-dominion-energy/releases/new`.
+
+   `<owner>` is whichever repository you are releasing — a fork cuts its own releases, and HACS installs from the repository the user added. The `gh` command above needs no owner: it reads the remote.
 
 6. **The `Release` workflow runs automatically:**
    - Checks out the repo
@@ -48,7 +52,7 @@ Tagged releases avoid this: HACS fetches `archive/refs/tags/vX.Y.Z.zip`, which r
    - Creates `dominion_energy.zip` from `custom_components/dominion_energy/`
    - Attaches the ZIP to the GitHub release
 
-7. **Verify** the release asset is attached at https://github.com/YeomansIII/ha-dominion-energy/releases.
+7. **Verify** the release asset is attached at `https://github.com/<owner>/ha-dominion-energy/releases`.
 
 ## Versioning
 
