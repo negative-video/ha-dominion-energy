@@ -8,7 +8,6 @@ from datetime import date
 from typing import Any
 
 from homeassistant.components.sensor import (
-    DOMAIN as SENSOR_DOMAIN,
     SensorDeviceClass,
     SensorEntity,
     SensorEntityDescription,
@@ -16,24 +15,12 @@ from homeassistant.components.sensor import (
 )
 from homeassistant.const import PERCENTAGE, UnitOfEnergy
 from homeassistant.core import HomeAssistant, callback
-from homeassistant.helpers import entity_registry as er
-from homeassistant.helpers.device_registry import DeviceEntryType, DeviceInfo
 from homeassistant.helpers.entity import EntityCategory
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
-from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
-from .const import (
-    CONF_ACCOUNT_NUMBER,
-    CONF_METER_NUMBER,
-    CONF_SERVICE_ADDRESS,
-    COST_MODE_SCHEDULE_1,
-    DOMAIN,
-)
-from .coordinator import (
-    DominionEnergyConfigEntry,
-    DominionEnergyCoordinator,
-    DominionEnergyData,
-)
+from .const import COST_MODE_SCHEDULE_1
+from .coordinator import DominionEnergyConfigEntry, DominionEnergyData
+from .entity import DominionEnergyEntity, resolve_identity
 from .rates import (
     LATEST_SCHEDULE_EFFECTIVE_DATE,
     PeriodBill,
@@ -330,61 +317,6 @@ def _breakdown_attributes(bill: PeriodBill) -> dict[str, Any]:
     return attrs
 
 
-def _uses_legacy_identity(
-    hass: HomeAssistant,
-    entry: DominionEnergyConfigEntry,
-    account_number: str,
-) -> bool:
-    """Return True when this entry keeps the original account-only identity.
-
-    Entities used to be keyed ``{account_number}_{description.key}`` and the
-    device was identified by ``(DOMAIN, account_number)``. Config entries are
-    now unique per account *and* meter, so two meters on one account would
-    collide on both. Simply switching everything to a meter-scoped scheme is
-    not an option: a changed unique ID orphans the existing entity and throws
-    away its recorded history.
-
-    The scheme is therefore "first meter keeps the old identity":
-
-    =============  ==========================  ==========================
-    entry          unique_id                   device identifier
-    =============  ==========================  ==========================
-    first meter    ``{account}_{key}``         ``(DOMAIN, {account})``
-    later meters   ``{account}_{meter}_{key}`` ``(DOMAIN, {account}_{meter})``
-    =============  ==========================  ==========================
-
-    "First" is resolved in two steps, in order:
-
-    1. If the entity registry already holds an account-only entity owned by
-       *this* entry, this entry is the first meter and keeps that identity
-       forever - no matter how many meters are added afterwards.
-    2. Otherwise (nothing registered yet) it is the first meter only if it is
-       the sole config entry for the account.
-
-    Both steps are stable across restarts and independent of the order in which
-    entries are set up, so an entry never changes identity once it has run.
-    """
-    registry = er.async_get(hass)
-    for description in ALL_SENSORS:
-        entity_id = registry.async_get_entity_id(
-            SENSOR_DOMAIN, DOMAIN, f"{account_number}_{description.key}"
-        )
-        if entity_id is None:
-            continue
-        registry_entry = registry.async_get(entity_id)
-        if (
-            registry_entry is not None
-            and registry_entry.config_entry_id == entry.entry_id
-        ):
-            return True
-
-    return not any(
-        other.entry_id != entry.entry_id
-        and other.data.get(CONF_ACCOUNT_NUMBER) == account_number
-        for other in hass.config_entries.async_entries(DOMAIN)
-    )
-
-
 async def async_setup_entry(
     hass: HomeAssistant,
     entry: DominionEnergyConfigEntry,
@@ -392,36 +324,7 @@ async def async_setup_entry(
 ) -> None:
     """Set up Dominion Energy sensors."""
     coordinator = entry.runtime_data
-    account_number = entry.data[CONF_ACCOUNT_NUMBER]
-    meter_number = entry.data.get(CONF_METER_NUMBER)
-    service_address = entry.data.get(CONF_SERVICE_ADDRESS)
-
-    if meter_number is None or _uses_legacy_identity(hass, entry, account_number):
-        unique_id_prefix = account_number
-        device_identifier = account_number
-        device_name = f"Dominion Energy {account_number}"
-    else:
-        unique_id_prefix = f"{account_number}_{meter_number}"
-        device_identifier = unique_id_prefix
-        # Only the additional meters get a disambiguating name, so the device
-        # of a pre-existing single-meter entry is left alone. Meter numbers are
-        # zero-padded to 18 characters; drop the padding to keep it readable.
-        device_name = (
-            f"Dominion Energy {account_number} "
-            f"meter {meter_number.lstrip('0') or meter_number}"
-        )
-
-    device_info = DeviceInfo(
-        identifiers={(DOMAIN, device_identifier)},
-        name=device_name,
-        manufacturer="Dominion Energy",
-        entry_type=DeviceEntryType.SERVICE,
-        configuration_url="https://myaccount.dominionenergy.com",
-    )
-
-    # Add service address as model if available
-    if service_address:
-        device_info["model"] = service_address
+    identity = resolve_identity(hass, entry)
 
     def _build(
         description: DominionEnergySensorDescription,
@@ -429,8 +332,7 @@ async def async_setup_entry(
         return DominionEnergySensor(
             coordinator=coordinator,
             description=description,
-            device_info=device_info,
-            unique_id_prefix=unique_id_prefix,
+            identity=identity,
         )
 
     async_add_entities(_build(description) for description in SENSORS)
@@ -464,24 +366,10 @@ async def async_setup_entry(
         )
 
 
-class DominionEnergySensor(CoordinatorEntity[DominionEnergyCoordinator], SensorEntity):
+class DominionEnergySensor(DominionEnergyEntity, SensorEntity):
     """Representation of a Dominion Energy sensor."""
 
-    _attr_has_entity_name = True
     entity_description: DominionEnergySensorDescription
-
-    def __init__(
-        self,
-        coordinator: DominionEnergyCoordinator,
-        description: DominionEnergySensorDescription,
-        device_info: DeviceInfo,
-        unique_id_prefix: str,
-    ) -> None:
-        """Initialize the sensor."""
-        super().__init__(coordinator)
-        self.entity_description = description
-        self._attr_unique_id = f"{unique_id_prefix}_{description.key}"
-        self._attr_device_info = device_info
 
     @property
     def native_value(self) -> float | str | date | None:

@@ -11,9 +11,10 @@ impossible to notice without a live Home Assistant:
 
 * a ``translation_key`` with no matching entry in the translation files (and
   the reverse) - the entity would fall back to an unnamed state,
-* a ``device_class``/``state_class`` pair Home Assistant rejects,
-* a change to the unique-ID or device-identifier scheme, which orphans every
-  existing entity and discards its recorded history.
+* a ``device_class``/``state_class`` pair Home Assistant rejects.
+
+The unique-ID and device-identifier schemes are shared by every platform and
+are guarded in ``tests/test_entity.py``.
 """
 
 from __future__ import annotations
@@ -25,6 +26,7 @@ from typing import Any
 
 import pytest
 
+from tests.astkit import describe, function, tuple_of_calls
 from tests.conftest import COMPONENT_DIR
 
 SENSOR_PATH = COMPONENT_DIR / "sensor.py"
@@ -32,13 +34,6 @@ STRINGS_PATH = COMPONENT_DIR / "strings.json"
 TRANSLATIONS_PATH = COMPONENT_DIR / "translations" / "en.json"
 
 DESCRIPTION_CLASS = "DominionEnergySensorDescription"
-ENTITY_CLASS = "DominionEnergySensor"
-
-# The unique-ID prefix every install used before config entries became unique
-# per account *and* meter. An entry that already owns entities under this
-# scheme must keep it, or its history is thrown away.
-LEGACY_UNIQUE_ID_TEMPLATE = "{account_number}_{key}"
-LEGACY_DEVICE_NAME_TEMPLATE = "Dominion Energy {account_number}"
 
 # Subset of homeassistant.components.sensor.const.DEVICE_CLASS_STATE_CLASSES
 # covering the device classes this platform uses. Kept here rather than
@@ -53,119 +48,19 @@ ALLOWED_STATE_CLASSES: dict[str, set[str]] = {
 }
 
 
-# ---------------------------------------------------------------------------
-# AST helpers
-# ---------------------------------------------------------------------------
-
-
-def _module() -> ast.Module:
-    """Parse sensor.py."""
-    return ast.parse(SENSOR_PATH.read_text(encoding="utf-8"))
-
-
-def _dotted(node: ast.expr) -> str:
-    """Render a Name/Attribute chain as dotted source text."""
-    if isinstance(node, ast.Name):
-        return node.id
-    if isinstance(node, ast.Attribute):
-        return f"{_dotted(node.value)}.{node.attr}"
-    raise AssertionError(f"not a dotted name: {ast.dump(node)}")
-
-
-def _literal(node: ast.expr) -> Any:
-    """Render a keyword value as a comparable Python value.
-
-    Constants come through as themselves; enum members and module constants
-    come through as their dotted source text (``"SensorDeviceClass.ENERGY"``),
-    which is enough to compare against without importing Home Assistant.
-    """
-    if isinstance(node, ast.Constant):
-        return node.value
-    return _dotted(node)
-
-
-def _format_template(node: ast.expr) -> str:
-    """Render a string expression as a ``str.format`` template.
-
-    ``f"{a}_{b}"`` becomes ``"{a}_{b}"`` and a bare ``a`` becomes ``"{a}"``, so
-    an f-string and the variable it is built from can be compared and filled in
-    by the tests below. An interpolation that is not a plain dotted name is
-    rendered as ``«source»`` - still inspectable, but deliberately not a
-    ``str.format`` field, since there is nothing sensible to substitute.
-    """
-    if isinstance(node, ast.Constant) and isinstance(node.value, str):
-        return node.value
-    if isinstance(node, ast.JoinedStr):
-        return "".join(_format_template(value) for value in node.values)
-    if isinstance(node, ast.FormattedValue):
-        try:
-            return "{" + _dotted(node.value) + "}"
-        except AssertionError:
-            return f"«{ast.unparse(node.value)}»"
-    return "{" + _dotted(node) + "}"
-
-
 def _tuple_of_descriptions(name: str) -> list[ast.Call]:
     """Return the description calls making up a module-level tuple."""
-    for node in _module().body:
-        target = None
-        if isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
-            target = node.target.id
-        elif isinstance(node, ast.Assign) and isinstance(node.targets[0], ast.Name):
-            target = node.targets[0].id
-        if target != name or node.value is None:
-            continue
-        assert isinstance(node.value, ast.Tuple), f"{name} is not a tuple literal"
-        calls = [
-            element
-            for element in node.value.elts
-            if isinstance(element, ast.Call)
-            and isinstance(element.func, ast.Name)
-            and element.func.id == DESCRIPTION_CLASS
-        ]
-        return calls
-    raise AssertionError(f"{name} not found in {SENSOR_PATH}")
+    return tuple_of_calls(SENSOR_PATH, name, DESCRIPTION_CLASS)
 
 
 def _describe(call: ast.Call) -> dict[str, Any]:
     """Return a description call's keyword arguments as plain values."""
-    fields: dict[str, Any] = {}
-    for keyword in call.keywords:
-        if keyword.arg is None or keyword.arg == "value_fn":
-            continue
-        fields[keyword.arg] = _literal(keyword.value)
-    return fields
+    return describe(call)
 
 
-def _function(name: str, class_name: str | None = None) -> ast.FunctionDef:
+def _function(name: str, class_name: str | None = None) -> ast.AST:
     """Return a module-level or method function definition by name."""
-    scope: list[ast.stmt] = _module().body
-    if class_name is not None:
-        for node in scope:
-            if isinstance(node, ast.ClassDef) and node.name == class_name:
-                scope = node.body
-                break
-        else:
-            raise AssertionError(f"class {class_name} not found")
-    for node in scope:
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and (
-            node.name == name
-        ):
-            return node  # type: ignore[return-value]
-    raise AssertionError(f"function {name} not found")
-
-
-def _assigned_templates(function: ast.AST, target_name: str) -> list[str]:
-    """Return every value assigned to ``target_name``, as format templates."""
-    return [
-        _format_template(node.value)
-        for node in ast.walk(function)
-        if isinstance(node, ast.Assign)
-        and any(
-            isinstance(target, ast.Name) and target.id == target_name
-            for target in node.targets
-        )
-    ]
+    return function(SENSOR_PATH, name, class_name)
 
 
 def _load_json(path: Path) -> dict[str, Any]:
@@ -461,174 +356,3 @@ class TestGenerationGating:
     def test_generation_entities_are_added_only_once(self) -> None:
         source = ast.unparse(_function("async_setup_entry"))
         assert "generation_added" in source
-
-
-class TestUniqueIdScheme:
-    """A changed unique_id orphans the entity and discards its history."""
-
-    ACCOUNT = "123456789123"
-    METER = "000000000296117800"
-    OTHER_METER = "000000000296117801"
-    KEY = "daily_usage"
-
-    def _entity_template(self) -> str:
-        init = _function("__init__", ENTITY_CLASS)
-        assignments = [
-            _format_template(node.value)
-            for node in ast.walk(init)
-            if isinstance(node, ast.Assign)
-            and any(
-                isinstance(target, ast.Attribute) and target.attr == "_attr_unique_id"
-                for target in node.targets
-            )
-        ]
-        assert len(assignments) == 1, "expected exactly one unique_id assignment"
-        return assignments[0]
-
-    def _prefix_templates(self) -> list[str]:
-        return _assigned_templates(_function("async_setup_entry"), "unique_id_prefix")
-
-    def _unique_ids(self) -> list[str]:
-        """Render the full unique_id for each identity branch."""
-        entity_template = self._entity_template()
-        rendered = []
-        for prefix_template in self._prefix_templates():
-            prefix = prefix_template.format(
-                account_number=self.ACCOUNT, meter_number=self.METER
-            )
-            rendered.append(
-                entity_template.format(
-                    unique_id_prefix=prefix,
-                    description=_Key(self.KEY),
-                )
-            )
-        return rendered
-
-    def test_entity_builds_its_id_from_a_prefix_and_the_key(self) -> None:
-        assert self._entity_template() == "{unique_id_prefix}_{description.key}"
-
-    def test_there_are_exactly_two_identity_branches(self) -> None:
-        assert len(self._prefix_templates()) == 2, (
-            "expected a legacy branch and a meter-scoped branch"
-        )
-
-    def test_legacy_identity_is_byte_identical_to_the_old_scheme(self) -> None:
-        """An existing single-meter entry keeps the ID it already registered."""
-        expected = LEGACY_UNIQUE_ID_TEMPLATE.format(
-            account_number=self.ACCOUNT, key=self.KEY
-        )
-        assert expected in self._unique_ids(), (
-            f"no identity branch still produces {expected!r}; every existing "
-            "install would lose its entity history"
-        )
-
-    def test_second_meter_gets_a_distinct_identity(self) -> None:
-        ids = self._unique_ids()
-        assert len(set(ids)) == 2, f"identity branches collide: {ids}"
-
-    def test_meter_scoped_ids_differ_between_meters(self) -> None:
-        meter_template = next(
-            template
-            for template in self._prefix_templates()
-            if "meter_number" in template
-        )
-        first = meter_template.format(
-            account_number=self.ACCOUNT, meter_number=self.METER
-        )
-        second = meter_template.format(
-            account_number=self.ACCOUNT, meter_number=self.OTHER_METER
-        )
-        assert first != second
-
-    def test_every_sensor_key_survives_both_branches(self) -> None:
-        """Keys must stay collision-free once the prefix is applied."""
-        entity_template = self._entity_template()
-        for prefix_template in self._prefix_templates():
-            prefix = prefix_template.format(
-                account_number=self.ACCOUNT, meter_number=self.METER
-            )
-            ids = [
-                entity_template.format(unique_id_prefix=prefix, description=_Key(key))
-                for key in ALL_KEYS
-            ]
-            assert len(set(ids)) == len(ALL_KEYS)
-
-
-class TestDeviceIdentity:
-    """The device is keyed the same way, for the same reason."""
-
-    ACCOUNT = "123456789123"
-    METER = "000000000296117800"
-
-    def _device_identifiers(self) -> list[str]:
-        return _assigned_templates(_function("async_setup_entry"), "device_identifier")
-
-    def _device_names(self) -> list[str]:
-        return _assigned_templates(_function("async_setup_entry"), "device_name")
-
-    def test_legacy_device_identifier_is_the_bare_account_number(self) -> None:
-        rendered = [
-            template.format(
-                account_number=self.ACCOUNT,
-                meter_number=self.METER,
-                unique_id_prefix=f"{self.ACCOUNT}_{self.METER}",
-            )
-            for template in self._device_identifiers()
-        ]
-        assert self.ACCOUNT in rendered, (
-            "an existing entry's device must keep identifiers={(DOMAIN, account)}"
-        )
-        assert len(set(rendered)) == 2, f"device identifiers collide: {rendered}"
-
-    def test_legacy_device_name_is_unchanged(self) -> None:
-        rendered = [
-            template.format(account_number=self.ACCOUNT)
-            for template in self._device_names()
-            if "meter_number" not in template
-        ]
-        expected = LEGACY_DEVICE_NAME_TEMPLATE.format(account_number=self.ACCOUNT)
-        assert rendered == [expected]
-
-    def test_additional_meters_get_a_distinguishing_device_name(self) -> None:
-        distinguishing = [
-            template for template in self._device_names() if "meter_number" in template
-        ]
-        assert len(distinguishing) == 1
-        assert "meter" in distinguishing[0]
-
-
-class TestIdentityResolution:
-    """The "first meter" decision has to be stable across restarts."""
-
-    def _source(self) -> str:
-        return ast.unparse(_function("_uses_legacy_identity"))
-
-    def test_it_consults_the_entity_registry(self) -> None:
-        """Registered entities are the only durable record of the old scheme."""
-        source = self._source()
-        assert "async_get_entity_id" in source
-        assert "config_entry_id" in source, (
-            "a legacy entity belonging to a different entry must not make this "
-            "entry claim the legacy identity"
-        )
-
-    def test_it_falls_back_to_being_the_only_entry_for_the_account(self) -> None:
-        source = self._source()
-        assert "async_entries" in source
-        assert "CONF_ACCOUNT_NUMBER" in source
-
-    def test_it_probes_every_sensor_key(self) -> None:
-        """A partially-registered entry (new sensor added later) still counts."""
-        assert "ALL_SENSORS" in self._source()
-
-    def test_setup_falls_back_to_legacy_without_a_meter_number(self) -> None:
-        """Entries predating the meter number must not key on ``None``."""
-        source = ast.unparse(_function("async_setup_entry"))
-        assert "meter_number is None or _uses_legacy_identity" in source
-
-
-class _Key:
-    """Stand-in exposing ``.key`` so ``{description.key}`` can be formatted."""
-
-    def __init__(self, key: str) -> None:
-        self.key = key
