@@ -12,7 +12,7 @@ from calendar import monthrange
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
-from typing import Protocol
+from typing import Protocol, overload
 
 # Fallback billing period length when the bill forecast is unavailable.
 DEFAULT_BILLING_PERIOD_DAYS = 30
@@ -117,6 +117,24 @@ def billing_period_days(
     return (period_end - period_start).days  # type: ignore[operator]
 
 
+@overload
+def billing_period_end(
+    period_start: date,
+    period_end: date | None,
+    default: int = ...,
+    today: date | None = ...,
+) -> date: ...
+
+
+@overload
+def billing_period_end(
+    period_start: None,
+    period_end: date | None,
+    default: int = ...,
+    today: date | None = ...,
+) -> date | None: ...
+
+
 def billing_period_end(
     period_start: date | None,
     period_end: date | None,
@@ -124,6 +142,11 @@ def billing_period_end(
     today: date | None = None,
 ) -> date | None:
     """Return a period end that can be trusted for date arithmetic.
+
+    Overloaded because the only way out with no end date is having no start
+    date either: given a real ``period_start`` a real end always comes back,
+    and callers holding a `BillForecast` -- whose period bounds are plain
+    ``date`` -- should not have to assert that.
 
     An untrustworthy end is replaced by the start plus ``default`` days, so the
     period keeps a full cycle's length instead of stopping at today.
