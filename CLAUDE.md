@@ -88,8 +88,26 @@ Sharp edges already handled — do not regress them:
 
 ### External Dependencies
 
-- **`dompower`**: Python library for the Dominion Energy API. Pinned in `manifest.json`; keep it in sync with the API surface used here.
+- **`dompower`**: Python library for the Dominion Energy API. **Installed from the fork at `negative-video/dompower`, not from PyPI** — see below. Keep it in sync with the API surface used here.
 - `recorder` is a Home Assistant dependency (external statistics).
+
+#### Installing the forked `dompower`
+
+The PyPI name `dompower` belongs to upstream, so the fork ships as a wheel attached to its own GitHub releases and `manifest.json` installs that asset by URL. Three files carry that URL and **must name the same release**: `manifest.json`, the `test-ha` extra in `pyproject.toml`, and mypy's `additional_dependencies` in `.pre-commit-config.yaml`.
+
+Two forms of the same URL, and they are not interchangeable:
+
+- `manifest.json` uses the **bare URL with a `#dompower==X.Y.Z` fragment**. Home Assistant parses this field itself (`homeassistant/util/package.py: is_installed`) and decides from it whether to install anything at all. Written the ordinary PEP 508 way — `dompower @ https://...` — the string parses as a requirement with an *empty* version specifier, which any installed version satisfies, so an existing PyPI `dompower` is judged good enough and the fork never installs. The fragment form fails that parse deliberately, sending HA down the branch that reads the version out of the fragment. Hassfest also rejects a requirement containing a space, which is the other reason the `name @ url` form cannot go here.
+- `pyproject.toml` and `.pre-commit-config.yaml` are read by uv/pip, which want the normal `dompower @ https://...` (or a bare URL, in pre-commit's list) and do not need a fragment.
+
+The version in the fragment must match the version the wheel actually carries. Name a version the wheel does not have and HA either never installs it or reinstalls it on every restart; the fork's release workflow fails the release rather than publish a mismatch.
+
+**A change in the `dompower` working tree does not reach Home Assistant until it is released.** For local work against an unreleased library, install it over the top after syncing:
+
+```bash
+uv sync --frozen --extra dev --extra test-ha --python 3.14
+uv pip install -e ../dompower
+```
 
 ### Services
 
@@ -131,5 +149,5 @@ Lint and format run over `custom_components/` **and** `tests/`, with Ruff pinned
 ### HACS Distribution
 
 - `hacs.json` holds HACS metadata, including the minimum Home Assistant version.
-- `manifest.json` carries the integration version and the `dompower` requirement pin.
+- `manifest.json` carries the integration version and the `dompower` requirement URL.
 - This repo is a fork of `YeomansIII/ha-dominion-energy`; changes are intended to go back upstream, so keep the documentation/issue-tracker URLs and coding style as they are.

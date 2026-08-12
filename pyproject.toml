@@ -21,9 +21,15 @@ dev = [
 # target. That release requires Python >= 3.14.2, so the pin is marked
 # accordingly and simply resolves to nothing on older interpreters - the
 # HA-dependent tests then skip instead of failing.
+#
+# `dompower` is installed from the fork's GitHub release asset, not PyPI - see
+# the note in CLAUDE.md. The PEP 508 direct-reference form (`name @ url`) is
+# what pip and uv want here; manifest.json has to use the bare-URL-plus-
+# fragment form instead, because Home Assistant parses that field itself.
+# Keep the two URLs pointing at the same release.
 test-ha = [
     "pytest-homeassistant-custom-component>=0.13.355; python_full_version >= '3.14.2'",
-    "dompower==0.2.2",
+    "dompower @ https://github.com/negative-video/dompower/releases/download/v0.3.0/dompower-0.3.0-py3-none-any.whl",
 ]
 # Type checking. Kept out of `dev` so the fast path stays small, and resolved
 # through uv.lock so a new mypy release cannot turn CI red on its own.

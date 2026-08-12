@@ -304,7 +304,7 @@ This is a public client identifier embedded in the Dominion Energy web app. It c
 ## Support
 
 - [Report Issues](https://github.com/YeomansIII/ha-dominion-energy/issues)
-- [dompower Library](https://github.com/YeomansIII/dompower)
+- [dompower Library](https://github.com/YeomansIII/dompower) — this build installs the fork at [negative-video/dompower](https://github.com/negative-video/dompower)
 
 ## License
 

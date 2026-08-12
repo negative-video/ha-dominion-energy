@@ -25,7 +25,7 @@ Tagged releases avoid this: HACS fetches `archive/refs/tags/vX.Y.Z.zip`, which r
 
 2. **Update `manifest.json`:**
    - Bump `version` to the new version
-   - Update `requirements` if the `dompower` dependency changed (ensure the new version is already published to PyPI)
+   - Update `requirements` if the `dompower` dependency changed (ensure the release asset it names already exists — see [Release Order](#release-order))
 
    Bump `version` in `pyproject.toml` to match. Nothing installs that package — it exists to carry the test and lint configuration — so a stale value breaks nothing, which is exactly why it silently fell two releases behind. Keep the two in step so neither has to be treated as the untrustworthy one.
 
@@ -35,6 +35,9 @@ Tagged releases avoid this: HACS fetches `archive/refs/tags/vX.Y.Z.zip`, which r
    git commit -m "Bump version to X.Y.Z"
    git push
    ```
+
+   Add `uv.lock` and `.pre-commit-config.yaml` to that `git add` if the
+   `dompower` URL moved.
 
 4. **Wait for CI to pass** on the version bump commit.
 
@@ -63,10 +66,22 @@ Follow [semver](https://semver.org/):
 
 ## Release Order
 
+`dompower` is installed from a wheel attached to a GitHub release on the fork
+at `negative-video/dompower`, **not from PyPI** — that name belongs to
+upstream. See `RELEASING.md` in that repository, and the "Installing the forked
+`dompower`" section of `CLAUDE.md` here for why the URL is written the way it
+is.
+
 If both `dompower` and `ha-dominion-energy` need releases:
 
-1. Release `dompower` first and wait for PyPI publish to complete
-2. Update `manifest.json` with the new `dompower==X.Y.Z` requirement
+1. Release `dompower` first and confirm the wheel is attached to the release
+2. Point all three files at the new release, all naming the same version:
+   - `custom_components/dominion_energy/manifest.json` — bare URL plus the
+     `#dompower==X.Y.Z` fragment
+   - `pyproject.toml`, `test-ha` extra — `dompower @ https://...`, then
+     `uv lock`
+   - `.pre-commit-config.yaml` — mypy's `additional_dependencies`
 3. Release `ha-dominion-energy`
 
-This ensures Home Assistant can resolve the `dompower` dependency when users install the update.
+Nothing resolves the dependency until the release asset exists: `uv lock` will
+404 and CI will fail, which is the intended order-of-operations check.
