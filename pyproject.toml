@@ -22,20 +22,36 @@ dev = [
 # accordingly and simply resolves to nothing on older interpreters - the
 # HA-dependent tests then skip instead of failing.
 #
-# `dompower` is installed from the fork's GitHub release asset, not PyPI - see
-# the note in CLAUDE.md. The PEP 508 direct-reference form (`name @ url`) is
-# what pip and uv want here; manifest.json has to use the bare-URL-plus-
-# fragment form instead, because Home Assistant parses that field itself.
-# Keep the two URLs pointing at the same release.
+# `dompower` comes from the fork, not PyPI - see the note in CLAUDE.md. The
+# source is declared in [tool.uv.sources] below rather than as a URL here, so
+# the requirement itself stays an ordinary name.
 test-ha = [
     "pytest-homeassistant-custom-component>=0.13.355; python_full_version >= '3.14.2'",
-    "dompower @ https://github.com/negative-video/dompower/releases/download/v0.3.0/dompower-0.3.0-py3-none-any.whl",
+    "dompower",
 ]
 # Type checking. Kept out of `dev` so the fast path stays small, and resolved
 # through uv.lock so a new mypy release cannot turn CI red on its own.
 typing = [
     "mypy>=1.13.0",
 ]
+
+# Where the forked `dompower` comes from for local work and CI. Home Assistant
+# installs the release wheel by URL (see manifest.json); this path deliberately
+# does not.
+#
+# GitHub answers release-asset downloads from Actions runners with an HTTP/2
+# REFUSED_STREAM often enough to fail the job outright - twice in a row here,
+# the second time after eight retries over 80 seconds. That status means the
+# server hit SETTINGS_MAX_CONCURRENT_STREAMS, and since reqwest (which uv is
+# built on) funnels one origin down a single reused HTTP/2 connection, and
+# runner egress addresses are shared between concurrent jobs, the pressure is
+# not even all ours to reduce. Retrying into it only fails more slowly.
+#
+# Cloning is a different path entirely, and one Actions is built around. The
+# tag is what keeps this honest: it names the same release the manifest
+# installs, and uv.lock pins the commit it resolved to.
+[tool.uv.sources]
+dompower = { git = "https://github.com/negative-video/dompower", tag = "v0.3.0" }
 
 [tool.ruff]
 target-version = "py312"

@@ -76,12 +76,17 @@ If both `dompower` and `ha-dominion-energy` need releases:
 
 1. Release `dompower` first and confirm the wheel is attached to the release
 2. Point all three files at the new release, all naming the same version:
-   - `custom_components/dominion_energy/manifest.json` — bare URL plus the
-     `#dompower==X.Y.Z` fragment
-   - `pyproject.toml`, `test-ha` extra — `dompower @ https://...`, then
-     `uv lock`
-   - `.pre-commit-config.yaml` — mypy's `additional_dependencies`
+   - `custom_components/dominion_energy/manifest.json` — the release asset URL
+     plus the `#dompower==X.Y.Z` fragment
+   - `pyproject.toml`, `[tool.uv.sources]` — `tag = "vX.Y.Z"`, then `uv lock`
+   - `.pre-commit-config.yaml` — `git+https://...@vX.Y.Z` in mypy's
+     `additional_dependencies`
 3. Release `ha-dominion-energy`
 
-Nothing resolves the dependency until the release asset exists: `uv lock` will
-404 and CI will fail, which is the intended order-of-operations check.
+Home Assistant installs the wheel while local work and CI clone the tag; the
+release workflow builds that wheel from the tagged commit, so the two agree as
+long as both name the same tag. `CLAUDE.md` explains why they differ.
+
+Nothing resolves until the tag and its release asset exist: `uv lock` fails on
+a missing tag and Home Assistant 404s on a missing asset, which is the intended
+order-of-operations check.

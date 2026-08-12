@@ -14,6 +14,7 @@ repos:
         args: [--ignore-missing-imports]
         additional_dependencies:
           - homeassistant
-          # The fork's release asset, not PyPI's `dompower`. Keep in step with
-          # pyproject.toml's test-ha extra and with manifest.json.
-          - https://github.com/negative-video/dompower/releases/download/v0.3.0/dompower-0.3.0-py3-none-any.whl
+          # The fork, not PyPI's `dompower`. Cloned rather than downloaded as a
+          # release asset, matching pyproject.toml's [tool.uv.sources] and for
+          # the same reason. Keep the tag in step with manifest.json's URL.
+          - git+https://github.com/negative-video/dompower@v0.3.0

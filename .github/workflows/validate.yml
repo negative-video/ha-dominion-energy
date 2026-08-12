@@ -14,25 +14,6 @@ permissions: {}
 env:
   # Keep in sync with the ruff rev in .pre-commit-config.yaml.
   RUFF_VERSION: "0.16.2"
-  # `dompower` is fetched from a GitHub release asset rather than PyPI, and
-  # GitHub intermittently answers a release download with an HTTP/2
-  # REFUSED_STREAM -- a refusal issued before the request is processed at all,
-  # which RFC 7540 marks as safe to retry. uv's default three retries burned
-  # through in 8.4 seconds and failed the job, discarding a ~575 MB Home
-  # Assistant install that had already completed.
-  #
-  # Measured rather than assumed: the refusals arrive in bursts. During one,
-  # two consecutive local runs failed while curl fetched the same asset over
-  # HTTP/2 without complaint and GitHub reported all systems operational; a
-  # few minutes later four runs passed with retries disabled entirely, at both
-  # default and reduced download concurrency. So this is a transient edge
-  # behaviour to ride out, not a load or concurrency problem to tune around --
-  # which is why UV_CONCURRENT_DOWNLOADS is deliberately left alone.
-  #
-  # Eight retries with uv's exponential backoff spans a few minutes, enough to
-  # outlast a burst. It costs nothing on the ordinary path: retries only
-  # elapse when a download is already failing.
-  UV_HTTP_RETRIES: "8"
 
 jobs:
   validate-hacs:

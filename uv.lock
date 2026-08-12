@@ -1033,30 +1033,12 @@ wheels = [
 [[package]]
 name = "dompower"
 version = "0.3.0"
-source = { url = "https://github.com/negative-video/dompower/releases/download/v0.3.0/dompower-0.3.0-py3-none-any.whl" }
+source = { git = "https://github.com/negative-video/dompower?tag=v0.3.0#525d0421767269b2438b2b321d5b24b7e583b407" }
 dependencies = [
     { name = "aiohttp" },
     { name = "openpyxl" },
     { name = "yarl" },
 ]
-wheels = [
-    { url = "https://github.com/negative-video/dompower/releases/download/v0.3.0/dompower-0.3.0-py3-none-any.whl", hash = "sha256:b4b033cd3271306e8698183099174d902ac3c55922d6ddc89689d907370431e4" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "aiohttp", specifier = ">=3.10.0" },
-    { name = "aresponses", marker = "extra == 'dev'", specifier = ">=3.0.0" },
-    { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.11.0" },
-    { name = "openpyxl", specifier = ">=3.1.5" },
-    { name = "pre-commit", marker = "extra == 'dev'", specifier = ">=4.0.0" },
-    { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.3.0" },
-    { name = "pytest-aiohttp", marker = "extra == 'dev'", specifier = ">=1.0.5" },
-    { name = "pytest-asyncio", marker = "extra == 'dev'", specifier = ">=0.24.0" },
-    { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.6.0,<0.17" },
-    { name = "yarl", specifier = ">=1.9.0" },
-]
-provides-extras = ["dev"]
 
 [[package]]
 name = "envs"
@@ -1365,7 +1347,7 @@ typing = [
 
 [package.metadata]
 requires-dist = [
-    { name = "dompower", marker = "extra == 'test-ha'", url = "https://github.com/negative-video/dompower/releases/download/v0.3.0/dompower-0.3.0-py3-none-any.whl" },
+    { name = "dompower", marker = "extra == 'test-ha'", git = "https://github.com/negative-video/dompower?tag=v0.3.0" },
     { name = "mypy", marker = "extra == 'typing'", specifier = ">=1.13.0" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.3.0" },
     { name = "pytest-asyncio", marker = "extra == 'dev'", specifier = ">=0.24.0" },

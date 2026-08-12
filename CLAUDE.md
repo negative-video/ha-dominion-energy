@@ -93,16 +93,17 @@ Sharp edges already handled — do not regress them:
 
 #### Installing the forked `dompower`
 
-The PyPI name `dompower` belongs to upstream, so the fork ships as a wheel attached to its own GitHub releases and `manifest.json` installs that asset by URL. Three files carry that URL and **must name the same release**: `manifest.json`, the `test-ha` extra in `pyproject.toml`, and mypy's `additional_dependencies` in `.pre-commit-config.yaml`.
+The PyPI name `dompower` belongs to upstream, so the fork ships from its own GitHub releases. **Three files name the release and must stay in step**: `manifest.json`, the `[tool.uv.sources]` entry in `pyproject.toml`, and mypy's `additional_dependencies` in `.pre-commit-config.yaml`. They deliberately reach it two different ways.
 
-Two forms of the same URL, and they are not interchangeable:
-
-- `manifest.json` uses the **bare URL with a `#dompower==X.Y.Z` fragment**. Home Assistant parses this field itself (`homeassistant/util/package.py: is_installed`) and decides from it whether to install anything at all. Written the ordinary PEP 508 way — `dompower @ https://...` — the string parses as a requirement with an *empty* version specifier, which any installed version satisfies, so an existing PyPI `dompower` is judged good enough and the fork never installs. The fragment form fails that parse deliberately, sending HA down the branch that reads the version out of the fragment. Hassfest also rejects a requirement containing a space, which is the other reason the `name @ url` form cannot go here.
-- `pyproject.toml` and `.pre-commit-config.yaml` are read by uv/pip, which want the normal `dompower @ https://...` (or a bare URL, in pre-commit's list) and do not need a fragment.
+**Home Assistant installs the release wheel by URL**, written as a **bare URL with a `#dompower==X.Y.Z` fragment**. HA parses this field itself (`homeassistant/util/package.py: is_installed`) and decides from it whether to install anything at all. Written the ordinary PEP 508 way — `dompower @ https://...` — the string parses as a requirement with an *empty* version specifier, which any installed version satisfies, so an existing PyPI `dompower` is judged good enough and the fork never installs. The fragment form fails that parse deliberately, sending HA down the branch that reads the version out of the fragment. Hassfest also rejects a requirement containing a space, which is the other reason the `name @ url` form cannot go here.
 
 The version in the fragment must match the version the wheel actually carries. Name a version the wheel does not have and HA either never installs it or reinstalls it on every restart; the fork's release workflow fails the release rather than publish a mismatch.
 
-**A change in the `dompower` working tree does not reach Home Assistant until it is released.** For local work against an unreleased library, install it over the top after syncing:
+**Local work and CI clone the tag instead**, via `[tool.uv.sources]` and a `git+https://...@vX.Y.Z` entry in pre-commit. This is not a stylistic difference. GitHub answers release-asset downloads from Actions runners with an HTTP/2 `REFUSED_STREAM` often enough to fail a job outright — twice consecutively here, the second time after eight retries over 80 seconds, while `curl` fetched the same asset from a laptop without complaint. That status means the server hit `SETTINGS_MAX_CONCURRENT_STREAMS`; reqwest, which uv is built on, funnels one origin down a single reused HTTP/2 connection, and runner egress addresses are shared between concurrent jobs, so the pressure is not all ours to reduce. Retrying into it only fails more slowly, which is why `UV_HTTP_RETRIES` was tried and abandoned.
+
+Both paths land on the same code, and the tag is what guarantees it: the release workflow builds the wheel from the tagged commit, and `uv.lock` pins the commit the tag resolves to. Verified for v0.3.0 — all nine files in the release wheel are byte-identical to the git-installed copies.
+
+**A change in the `dompower` working tree does not reach either path until it is tagged and released.** For local work against an unreleased library, install it over the top after syncing:
 
 ```bash
 uv sync --frozen --extra dev --extra test-ha --python 3.14
