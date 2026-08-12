@@ -17,11 +17,18 @@ _pkg_dir = str(
 if _pkg_dir not in sys.path:
     sys.path.insert(0, _pkg_dir)
 
-from rates import VA_SCHEDULE_1, calculate_schedule1_interval_cost  # noqa: E402
+from rates import (  # noqa: E402
+    VA_SCHEDULE_1,
+    Season,
+    calculate_schedule1_interval_cost,
+    calculate_schedule1_period_bill,
+)
 from usage import (  # noqa: E402
     DEFAULT_BILLING_PERIOD_DAYS,
+    MIN_BILLING_PERIOD_DAYS,
     aggregate_hourly,
     billing_period_days,
+    billing_period_end,
     billing_period_start,
     build_cumulative_statistics,
     day_looks_complete,
@@ -104,6 +111,133 @@ class TestBillingPeriodDays:
         assert billing_period_days(date(2026, 1, 1), date(2026, 12, 31)) == (
             DEFAULT_BILLING_PERIOD_DAYS
         )
+
+    def test_end_not_in_the_future_falls_back(self):
+        """The regression: a plausible *length* is not a plausible period.
+
+        Observed live on 2026-08-12. The forecast reported 07-23 -> 08-12 while
+        the meter's real cycle still had eight days to run, because the API
+        returns the date usage is published through rather than the next read
+        (and `dompower` substitutes `date.today()` when the field is absent).
+        Twenty days clears MIN_BILLING_PERIOD_DAYS, so the length check alone
+        waves it through and every downstream consumer believes the period is
+        over.
+        """
+        start, truncated = date(2026, 7, 23), date(2026, 8, 12)
+        assert (truncated - start).days == MIN_BILLING_PERIOD_DAYS
+        assert billing_period_days(start, truncated) == MIN_BILLING_PERIOD_DAYS
+        assert billing_period_days(start, truncated, today=truncated) == (
+            DEFAULT_BILLING_PERIOD_DAYS
+        )
+
+    def test_end_already_past_falls_back(self):
+        assert (
+            billing_period_days(
+                date(2026, 7, 23), date(2026, 8, 12), today=date(2026, 8, 15)
+            )
+            == DEFAULT_BILLING_PERIOD_DAYS
+        )
+
+    def test_future_end_is_still_trusted(self):
+        assert (
+            billing_period_days(
+                date(2026, 7, 23), date(2026, 8, 20), today=date(2026, 8, 12)
+            )
+            == 28
+        )
+
+    def test_caller_supplied_default_is_used(self):
+        # The last bill's real read-to-read length beats a nominal 30.
+        assert (
+            billing_period_days(
+                date(2026, 7, 23),
+                date(2026, 8, 12),
+                default=28,
+                today=date(2026, 8, 12),
+            )
+            == 28
+        )
+
+
+class TestProjectionDoesNotDegenerate:
+    """The projection must not collapse to usage-to-date mid-cycle.
+
+    `project_period_usage` is period_to_date / days_observed * days_in_period.
+    When the reported end tracks today those two day counts are the same
+    number, they cancel, and the projection returns exactly what has been used
+    so far -- which reads as a confident forecast rather than a missing one.
+    """
+
+    START = date(2026, 7, 23)
+    TO_DATE = 1323.505
+
+    @staticmethod
+    def _project(to_date, days_observed, days_in_period):
+        return max(to_date / days_observed * days_in_period, to_date)
+
+    def test_truncated_end_would_collapse_the_projection(self):
+        collapsed = self._project(
+            self.TO_DATE, 20, billing_period_days(self.START, date(2026, 8, 12))
+        )
+        assert collapsed == pytest.approx(self.TO_DATE)
+
+    def test_repaired_end_keeps_projecting(self):
+        projected = self._project(
+            self.TO_DATE,
+            20,
+            billing_period_days(
+                self.START, date(2026, 8, 12), default=28, today=date(2026, 8, 12)
+            ),
+        )
+        assert projected == pytest.approx(1852.9, abs=0.1)
+        assert projected > self.TO_DATE * 1.3
+
+
+class TestBillingPeriodEnd:
+    """Tests for repairing a period end that cannot be trusted."""
+
+    def test_plausible_end_is_returned_unchanged(self):
+        assert billing_period_end(date(2026, 7, 18), date(2026, 8, 17)) == (
+            date(2026, 8, 17)
+        )
+
+    def test_period_truncated_at_today_is_extended(self):
+        # The forecast reported the period as ending on the day it was read,
+        # making a monthly cycle look 19 days long.
+        assert billing_period_end(date(2026, 7, 23), date(2026, 8, 11)) == (
+            date(2026, 8, 22)
+        )
+
+    def test_missing_end_falls_back_to_a_full_cycle(self):
+        assert billing_period_end(date(2026, 7, 18), None) == date(2026, 8, 17)
+
+    def test_missing_start_is_left_alone(self):
+        assert billing_period_end(None, date(2026, 8, 17)) == date(2026, 8, 17)
+        assert billing_period_end(None, None) is None
+
+    def test_end_tracking_today_is_extended_by_the_real_cycle(self):
+        # The live 2026-08-12 case, with the last bill's 28-day cycle as the
+        # default rather than a nominal 30.
+        assert billing_period_end(
+            date(2026, 7, 23), date(2026, 8, 12), 28, date(2026, 8, 12)
+        ) == date(2026, 8, 20)
+
+    def test_repaired_period_lands_in_the_right_season(self):
+        """The regression this exists for.
+
+        A cycle running 09-20 to 10-19 has an October midpoint, so the tariff
+        prices it at winter generation rates. Truncated at a late-September
+        "today" the midpoint falls in September and the whole bill is priced as
+        summer -- 4.62 c/kWh on generation over 800 kWh instead of 2.70.
+        """
+        start, truncated = date(2026, 9, 20), date(2026, 9, 25)
+        summer = calculate_schedule1_period_bill(2000.0, start, truncated)
+        repaired = calculate_schedule1_period_bill(
+            2000.0, start, billing_period_end(start, truncated)
+        )
+        assert summer.season is Season.SUMMER
+        assert repaired.season is Season.WINTER
+        assert summer.total - repaired.total > 20.0
 
 
 class TestBillingPeriodStart:

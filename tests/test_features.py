@@ -223,11 +223,21 @@ class ConsumptionOnlyInterval:
 
 
 @dataclass(frozen=True)
+class _LastBill:
+    """The completed period `_default_period_days` measures the cycle from."""
+
+    period_start: date | None = date(2026, 6, 5)
+    period_end: date | None = date(2026, 7, 5)
+
+
+@dataclass(frozen=True)
 class _Forecast:
-    """The two fields `_projected_bill` reads off a ``BillForecast``."""
+    """The fields `_projected_bill` reads off a ``BillForecast``."""
 
     current_period_start: date
     current_period_end: date
+    # Frozen, so one shared instance is a safe default.
+    last_bill: _LastBill = _LastBill()
 
 
 def make_day(
@@ -469,6 +479,35 @@ class TestProjectedBillBreakdown:
         winter = projected_bill(1000.0, _Forecast(*WINTER_PERIOD))
         assert summer is not None and winter is not None
         assert summer.total != pytest.approx(winter.total)
+
+    # A cycle whose end tracks today, at the point the truncated length first
+    # looks plausible: 20 days clears MIN_BILLING_PERIOD_DAYS, so only the
+    # "must be in the future" check can catch it. The last bill supplies the
+    # real 28-day cycle, which carries the midpoint from September into
+    # October -- i.e. from summer generation rates to winter ones.
+    TRUNCATED = _Forecast(
+        date(2026, 9, 20),
+        date(2026, 10, 10),
+        _LastBill(date(2026, 8, 23), date(2026, 9, 20)),
+    )
+
+    def test_an_end_tracking_today_is_repaired_before_pricing(self) -> None:
+        """The 2026-08-12 regression, in the month where it changes the price."""
+        bill = projected_bill(2000.0, self.TRUNCATED, date(2026, 10, 10))
+        assert bill is not None
+        assert bill.season.value == "winter"
+
+    def test_a_future_end_is_priced_as_reported(self) -> None:
+        """Repair must not fire on a period that has not finished yet."""
+        bill = projected_bill(2000.0, self.TRUNCATED, date(2026, 9, 25))
+        assert bill is not None
+        assert bill.season.value == "summer"
+
+    def test_repair_is_worth_real_money(self) -> None:
+        truncated = projected_bill(2000.0, self.TRUNCATED, date(2026, 9, 25))
+        repaired = projected_bill(2000.0, self.TRUNCATED, date(2026, 10, 10))
+        assert truncated is not None and repaired is not None
+        assert truncated.total - repaired.total > 20.0
 
     def test_no_projection_yields_no_breakdown(self) -> None:
         """Early in a period there is nothing to extrapolate from yet."""

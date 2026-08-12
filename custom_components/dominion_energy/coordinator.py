@@ -109,10 +109,12 @@ from .rates import (
     get_schedule_for_date,
 )
 from .usage import (
+    DEFAULT_BILLING_PERIOD_DAYS,
     MIN_NONZERO_INTERVALS,
     UsageInterval,
     aggregate_hourly,
     billing_period_days,
+    billing_period_end,
     billing_period_start,
     build_cumulative_statistics,
     day_looks_complete,
@@ -416,6 +418,13 @@ class DominionEnergyData:
     # mode: it is what actually makes up a Dominion bill, and it is the only
     # mode that can say where the money goes. See `_projected_bill()`.
     projected_bill: PeriodBill | None = None
+
+    # The end of the current billing period after `billing_period_end()` has
+    # repaired a value that tracks today rather than naming the next meter
+    # read. The sensor shows this rather than the raw forecast field so it
+    # cannot contradict the projection, which is extrapolated over exactly
+    # this period. None when there is no forecast to anchor it.
+    period_end_date: date | None = None
 
     # Our Schedule 1 estimate of the last completed bill against what Dominion
     # actually charged, so stale rate data announces itself. See rate_check().
@@ -832,7 +841,19 @@ class DominionEnergyCoordinator(DataUpdateCoordinator[DominionEnergyData]):
                 projected_period_cost,
             ) = self._period_projection(period_intervals, bill_forecast)
 
-            projected_bill = self._projected_bill(projected_period_usage, bill_forecast)
+            projected_bill = self._projected_bill(
+                projected_period_usage, bill_forecast, dt_util.now().date()
+            )
+            period_end_date = (
+                billing_period_end(
+                    bill_forecast.current_period_start,
+                    bill_forecast.current_period_end,
+                    self._default_period_days(bill_forecast),
+                    dt_util.now().date(),
+                )
+                if bill_forecast
+                else None
+            )
 
             # Built from the whole fetched window, not the month or period
             # slices: the API returns its full ~68 day workbook whatever range
@@ -895,6 +916,7 @@ class DominionEnergyCoordinator(DataUpdateCoordinator[DominionEnergyData]):
                 projected_period_usage=projected_period_usage,
                 projected_period_cost=projected_period_cost,
                 projected_bill=projected_bill,
+                period_end_date=period_end_date,
                 profile=profile,
                 day_comparison=day_comparison,
                 baseline=baseline,
@@ -939,12 +961,34 @@ class DominionEnergyCoordinator(DataUpdateCoordinator[DominionEnergyData]):
             raise UpdateFailed(f"API error: {err}") from err
 
     @staticmethod
-    def _billing_period_days(bill_forecast: BillForecast | None) -> int:
+    def _default_period_days(bill_forecast: BillForecast | None) -> int:
+        """Return the cycle length to assume when the reported end is no good.
+
+        The last bill is a *completed* period, so its two dates are real meter
+        reads and its length is this meter's actual cycle -- a far better guess
+        than a nominal 30 days, which read cycles routinely miss by several.
+        Falls back to the nominal length when the last bill is missing or its
+        own dates are implausible.
+        """
+        if bill_forecast is None:
+            return DEFAULT_BILLING_PERIOD_DAYS
+        return billing_period_days(
+            bill_forecast.last_bill.period_start,
+            bill_forecast.last_bill.period_end,
+        )
+
+    @classmethod
+    def _billing_period_days(
+        cls, bill_forecast: BillForecast | None, today: date | None = None
+    ) -> int:
         """Return the length of the current billing period in days."""
         if bill_forecast is None:
             return billing_period_days(None, None)
         return billing_period_days(
-            bill_forecast.current_period_start, bill_forecast.current_period_end
+            bill_forecast.current_period_start,
+            bill_forecast.current_period_end,
+            cls._default_period_days(bill_forecast),
+            today,
         )
 
     @staticmethod
@@ -987,9 +1031,12 @@ class DominionEnergyCoordinator(DataUpdateCoordinator[DominionEnergyData]):
         usage = sum(i.consumption for i in period_intervals)
         cost = self._calculate_cost(period_intervals, bill_forecast)
         days_observed = len({i.timestamp.date() for i in period_intervals})
+        today = dt_util.now().date()
 
         projected_usage = project_period_usage(
-            usage, days_observed, self._billing_period_days(bill_forecast)
+            usage,
+            days_observed,
+            self._billing_period_days(bill_forecast, today),
         )
         if projected_usage is None:
             return round(usage, 3), cost, None, None
@@ -998,7 +1045,9 @@ class DominionEnergyCoordinator(DataUpdateCoordinator[DominionEnergyData]):
             round(usage, 3),
             cost,
             round(projected_usage, 3),
-            self._project_period_cost(projected_usage, usage, cost, bill_forecast),
+            self._project_period_cost(
+                projected_usage, usage, cost, bill_forecast, today
+            ),
         )
 
     async def _async_handle_token_expiry(
@@ -1111,10 +1160,12 @@ class DominionEnergyCoordinator(DataUpdateCoordinator[DominionEnergyData]):
 
         return merge_windows(windows)
 
-    @staticmethod
+    @classmethod
     def _projected_bill(
+        cls,
         projected_usage: float | None,
         bill_forecast: BillForecast | None,
+        today: date | None = None,
     ) -> PeriodBill | None:
         """Break a projected billing period into its Schedule 1 components.
 
@@ -1129,13 +1180,28 @@ class DominionEnergyCoordinator(DataUpdateCoordinator[DominionEnergyData]):
         The caller is responsible for saying which of the two totals a
         dashboard is looking at — see the `breakdown_basis` attribute in
         `sensor.py`.
+
+        The period end is run through `billing_period_end()` first. Only the
+        midpoint of the period is used from these two dates -- to pick the
+        season and the effective rate schedule -- and a period reported as
+        ending today rather than on the next read date drags that midpoint
+        backwards by half the remaining cycle.
+
+        `today` is a parameter rather than a `dt_util.now()` call so this stays
+        decidable without a clock, and so the truncation it guards against can
+        be asserted directly. Callers on the update path pass the real date.
         """
         if projected_usage is None or bill_forecast is None:
             return None
         return calculate_schedule1_period_bill(
             projected_usage,
             bill_forecast.current_period_start,
-            bill_forecast.current_period_end,
+            billing_period_end(
+                bill_forecast.current_period_start,
+                bill_forecast.current_period_end,
+                cls._default_period_days(bill_forecast),
+                today,
+            ),
         )
 
     def _project_period_cost(
@@ -1144,12 +1210,18 @@ class DominionEnergyCoordinator(DataUpdateCoordinator[DominionEnergyData]):
         period_to_date_usage: float,
         period_to_date_cost: float,
         bill_forecast: BillForecast,
+        today: date | None = None,
     ) -> float | None:
-        """Price a projected period usage in the configured cost mode."""
+        """Price a projected period usage in the configured cost mode.
+
+        `today` must be the same date `_projected_bill()` is given on the
+        update path, or the shown cost and the breakdown behind it would be
+        priced over two different periods.
+        """
         cost_mode = self.config_entry.options.get(CONF_COST_MODE, COST_MODE_API)
 
         if cost_mode == COST_MODE_SCHEDULE_1:
-            period_bill = self._projected_bill(projected_usage, bill_forecast)
+            period_bill = self._projected_bill(projected_usage, bill_forecast, today)
             assert period_bill is not None  # both arguments are non-None here
             return round(period_bill.total, 2)
 
@@ -1201,7 +1273,9 @@ class DominionEnergyCoordinator(DataUpdateCoordinator[DominionEnergyData]):
             # date, since a window can straddle a rate change.
             cost = 0.0
             cumulative_kwh = 0.0
-            billing_days = self._billing_period_days(bill_forecast)
+            billing_days = self._billing_period_days(
+                bill_forecast, dt_util.now().date()
+            )
             for interval in intervals:
                 cost += calculate_schedule1_interval_cost(
                     interval.consumption,
@@ -1311,7 +1385,7 @@ class DominionEnergyCoordinator(DataUpdateCoordinator[DominionEnergyData]):
         forecast, and the customer charge is prorated over that same period, so
         statistics agree with the sensors.
         """
-        billing_days = self._billing_period_days(bill_forecast)
+        billing_days = self._billing_period_days(bill_forecast, dt_util.now().date())
         return aggregate_hourly(
             intervals,
             lambda interval, cumulative_before: self._calculate_interval_cost(
@@ -2316,7 +2390,7 @@ class DominionEnergyCoordinator(DataUpdateCoordinator[DominionEnergyData]):
         if self.data is not None and self.data.bill_forecast is not None:
             anchor = self.data.bill_forecast.current_period_start
         period_days = self._billing_period_days(
-            self.data.bill_forecast if self.data else None
+            self.data.bill_forecast if self.data else None, dt_util.now().date()
         )
 
         priced: dict[datetime, float] = {}

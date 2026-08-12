@@ -20,6 +20,7 @@ from rates import (  # noqa: E402
     VA_SCHEDULE_1,
     VA_SCHEDULE_1_HISTORY,
     ConsumptionTaxTier,
+    RiderCategory,
     Season,
     TieredRate,
     bill_discrepancy,
@@ -368,6 +369,55 @@ class TestPeriodBill:
         )
         assert bill.total == pytest.approx(parts)
 
+    def test_rider_categories_partition_the_rider_total(self):
+        """Every rider must land in exactly one bill section.
+
+        A rider that fell through the split would quietly vanish from the
+        breakdown while still being charged in `total`.
+        """
+        bill = calculate_schedule1_period_bill(
+            1000.0, date(2026, 7, 12), date(2026, 8, 11)
+        )
+        split = (
+            bill.distribution_riders
+            + bill.supply_riders
+            + bill.transmission_riders
+            + bill.fuel
+            + bill.taxes_and_fees_riders
+        )
+        assert split == pytest.approx(bill.riders)
+
+    def test_every_encoded_rider_has_a_category(self):
+        for schedule in VA_SCHEDULE_1_HISTORY:
+            for rider in schedule.riders:
+                assert isinstance(rider.category, RiderCategory), (
+                    f"{rider.name} in {schedule.effective_date} has no bill section"
+                )
+
+    def test_rider_rate_sums_only_its_own_category(self):
+        schedule = get_schedule_for_date(date(2026, 8, 1))
+        by_category = sum(schedule.rider_rate(category) for category in RiderCategory)
+        assert by_category == pytest.approx(schedule.total_rider_rate)
+        # Rider A is the whole of the fuel section, and nothing else is in it.
+        fuel = next(r for r in schedule.riders if r.name == "Fuel/A")
+        assert schedule.rider_rate(RiderCategory.FUEL) == pytest.approx(fuel.rate)
+
+    def test_transmission_section_carries_rider_t1(self):
+        """The bill prints Rider T1 under Transmission, not as a loose rider.
+
+        Left in a general rider bucket it makes transmission look like 0.97
+        c/kWh when the customer is actually paying 2.15.
+        """
+        schedule = get_schedule_for_date(date(2026, 8, 1))
+        t1 = next(r for r in schedule.riders if r.name == "T1")
+        assert t1.category is RiderCategory.TRANSMISSION
+        bill = calculate_schedule1_period_bill(
+            1000.0, date(2026, 7, 12), date(2026, 8, 11), schedule=schedule
+        )
+        assert bill.components()["transmission_charge"] == pytest.approx(
+            round(1000.0 * (schedule.transmission_rate + t1.rate), 2), abs=0.01
+        )
+
     def test_zero_usage_still_bills_the_customer_charge(self):
         bill = calculate_schedule1_period_bill(
             0.0, date(2026, 7, 12), date(2026, 8, 11)
@@ -425,8 +475,8 @@ class TestPeriodBillComponents:
         "distribution_charge",
         "generation_charge",
         "transmission_charge",
-        "rider_charges",
-        "consumption_tax",
+        "fuel_charge",
+        "taxes_and_fees",
     }
 
     def test_exposes_exactly_the_documented_keys(self):
@@ -454,7 +504,25 @@ class TestPeriodBillComponents:
         whole reason `components()` renames the field.
         """
         assert self.BILL.components()["generation_charge"] == pytest.approx(
-            round(self.BILL.generation, 2)
+            round(self.BILL.generation + self.BILL.supply_riders, 2)
+        )
+
+    def test_no_component_is_a_bucket_that_dominates_the_bill(self):
+        """Guard the reason `components()` splits the riders at all.
+
+        A single line item carrying more than half the bill is the signature of
+        the old combined "rider_charges" key, which at current rates was 54% of
+        a summer bill and told the reader nothing.
+        """
+        components = self.BILL.components()
+        assert max(components.values()) < 0.5 * self.BILL.total
+
+    def test_fuel_gets_its_own_line(self):
+        """Rider A is section B.4 of the printed bill, and 20% of the total."""
+        schedule = get_schedule_for_date(date(2026, 7, 27))
+        fuel = next(r for r in schedule.riders if r.name == "Fuel/A")
+        assert self.BILL.components()["fuel_charge"] == pytest.approx(
+            round(1000.0 * fuel.rate, 2), abs=0.01
         )
 
     def test_largest_component_is_a_component_key(self):

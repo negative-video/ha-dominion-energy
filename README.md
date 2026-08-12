@@ -114,7 +114,7 @@ Under "Configure" → **Usage insights**:
 | Always-on baseline | Standing draw when nothing is running (W) | measurement |
 | Busiest hour | The hour of the day the house uses most, e.g. `6 PM` | — |
 
-**Projected billing period cost** carries the bill's line items as attributes — `distribution_charge`, `generation_charge`, `rider_charges`, `transmission_charge`, `consumption_tax` and `customer_charge` — so you can see *why* a bill moved when your usage did not. These are always priced with the full Schedule 1 tariff; `breakdown_matches_state` tells you whether they add up to the sensor's own value or sit alongside it (they only match in Schedule 1 cost mode).
+**Projected billing period cost** carries the bill's line items as attributes — `distribution_charge`, `generation_charge`, `transmission_charge`, `fuel_charge`, `taxes_and_fees` and `customer_charge` — so you can see *why* a bill moved when your usage did not. These are the sections Dominion prints, so each rider is folded into the charge it is recovered under rather than lumped into one opaque "riders" line. These are always priced with the full Schedule 1 tariff; `breakdown_matches_state` tells you whether they add up to the sensor's own value or sit alongside it (they only match in Schedule 1 cost mode).
 
 ### Understanding your usage
 
@@ -151,11 +151,13 @@ If your meter reports excess generation, three more sensors appear automatically
 | Sensor | Description |
 |--------|-------------|
 | Billing period start | First day of the current billing period |
-| Billing period end | Last day of the current billing period |
+| Billing period end | Next meter read, ending the current billing period |
 | Time-of-use plan | `Yes`/`No` — whether the account is billed on a time-of-use plan |
 | Estimated last bill charges | What the Schedule 1 tariff model computes for the last bill ($) |
 | Rate model drift | How far that estimate lands from the real bill (%) |
 | Rate schedule effective date | Effective date of the newest tariff data bundled with this integration |
+
+> **Note**: **Billing period end** is not always the raw API field. Dominion reports a period that is still running as ending *today*, so the value walks forward a day at a time and the period looks shorter than it is. Once that length passes the 20-day plausibility floor it stops looking obviously wrong, and the projection — usage-to-date ÷ days observed × days in period — collapses to exactly usage-to-date. An end that is not in the future is therefore replaced with the period start plus the length of the last completed bill, which is a real meter-read-to-meter-read cycle for that meter.
 
 > **Tip**: **Rate model drift** is a staleness alarm. Dominion re-files its riders periodically — the fuel factor typically changes around July 1 — and this integration ships the rates hard-coded. A drift figure that suddenly grows means the bundled tariff data has fallen behind and should be refreshed. See [docs/rate-schedules.md](docs/rate-schedules.md).
 

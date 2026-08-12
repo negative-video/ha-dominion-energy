@@ -219,9 +219,10 @@ SENSORS: tuple[DominionEnergySensorDescription, ...] = (
         translation_key="billing_period_end",
         device_class=SensorDeviceClass.DATE,
         entity_category=EntityCategory.DIAGNOSTIC,
-        value_fn=lambda data: (
-            data.bill_forecast.current_period_end if data.bill_forecast else None
-        ),
+        # `period_end_date`, not the raw forecast field: the API reports an
+        # in-progress period as ending today, which would put this sensor a
+        # week or more before the date the projection extrapolates to.
+        value_fn=lambda data: data.period_end_date,
     ),
     DominionEnergySensorDescription(
         key="is_time_of_use",
