@@ -24,7 +24,7 @@ from dompower import (
 )
 
 from homeassistant.components.recorder import get_instance
-from homeassistant.components.recorder.history import state_changes_during_period
+from homeassistant.components.recorder.history import get_significant_states
 from homeassistant.components.recorder.models import (
     StatisticData,
     StatisticMeanType,
@@ -980,20 +980,33 @@ class DominionEnergyCoordinator(DataUpdateCoordinator[DominionEnergyData]):
         )
 
     async def _async_hvac_windows(
-        self, first_night: date, last_night: date
+        self, first_day: date, last_day: date
     ) -> list[TimeWindow]:
         """Read when the configured thermostats were actually running.
 
         Returns an empty list when no climate entities are configured, which
         leaves the baseline unfiltered -- correct for a household whose heating
-        and cooling never runs overnight, and clearly labelled on the sensor
-        for one whose does.
+        and cooling never runs during its quiet hours, and clearly labelled on
+        the sensor for one whose does.
 
-        The window is bounded by the nights being measured rather than by the
-        recorder's retention, so a default `purge_keep_days` of 10 comfortably
-        covers the seven nights looked at. Nothing is cached: `_async_fetch_data`
-        already short-circuits once the day's data is complete, so this runs at
-        most once per day.
+        **This must read every recorded row, not just state changes.**
+        `hvac_action` is an *attribute*: a thermostat cycles
+        idle -> cooling -> idle all night while its state sits on `heat_cool`
+        throughout, so `last_changed` never moves and only `last_updated` does.
+        `state_changes_during_period()` returns state-*value* changes, which on
+        a real ecobee meant two samples across a week instead of dozens of
+        compressor cycles -- the filter silently did almost nothing and the
+        baseline reported the air conditioner. `get_significant_states()` with
+        `significant_changes_only=False` returns the attribute-only rows too.
+
+        One call covers every entity; the result is keyed by entity ID, and the
+        per-entity lists must stay separate because `hvac_active_windows()`
+        runs each sample to the next one.
+
+        Nothing is cached: `_async_fetch_data` already short-circuits once the
+        day's data is complete, so this runs at most once per day. The window
+        spans the days being measured, well inside a default `purge_keep_days`
+        of 10.
         """
         entity_ids: list[str] = list(
             self.config_entry.options.get(CONF_HVAC_ENTITIES) or []
@@ -1001,23 +1014,26 @@ class DominionEnergyCoordinator(DataUpdateCoordinator[DominionEnergyData]):
         if not entity_ids:
             return []
 
-        start = dt_util.start_of_local_day(first_night)
-        end = dt_util.start_of_local_day(last_night) + timedelta(days=1)
+        start = dt_util.start_of_local_day(first_day)
+        end = dt_util.start_of_local_day(last_day) + timedelta(days=1)
+
+        recorder = get_instance(self.hass)
+        history = await recorder.async_add_executor_job(
+            partial(
+                get_significant_states,
+                self.hass,
+                start,
+                end,
+                entity_ids,
+                include_start_time_state=True,
+                significant_changes_only=False,
+                minimal_response=False,
+                no_attributes=False,
+            )
+        )
 
         windows: list[TimeWindow] = []
-        recorder = get_instance(self.hass)
         for entity_id in entity_ids:
-            history = await recorder.async_add_executor_job(
-                partial(
-                    state_changes_during_period,
-                    self.hass,
-                    start,
-                    end,
-                    entity_id,
-                    include_start_time_state=True,
-                    no_attributes=False,
-                )
-            )
             states = history.get(entity_id) or []
             if not states:
                 _LOGGER.debug(
@@ -1026,9 +1042,6 @@ class DominionEnergyCoordinator(DataUpdateCoordinator[DominionEnergyData]):
                     entity_id,
                 )
                 continue
-            # One entity at a time: `hvac_active_windows` runs each sample to
-            # the next one, so interleaving two thermostats' histories would
-            # cut every span short at the other's next state change.
             windows.extend(
                 hvac_active_windows(
                     [

@@ -16,6 +16,7 @@ stubbed and the real module is imported.
 
 from __future__ import annotations
 
+import ast
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 import importlib.util
@@ -88,7 +89,7 @@ def _placeholder_modules() -> dict[str, types.ModuleType]:
         "homeassistant.components": {},
         "homeassistant.components.recorder": {"get_instance": _unused},
         "homeassistant.components.recorder.history": {
-            "state_changes_during_period": _unused,
+            "get_significant_states": _unused,
         },
         "homeassistant.components.recorder.models": {
             "StatisticData": dict,
@@ -810,3 +811,64 @@ class TestInvertedStatisticsWindow:
     def test_same_day_rewrite_is_fetchable(self) -> None:
         data_date = date(2026, 8, 10)
         assert statistics_window_is_fetchable(data_date, data_date)
+
+
+class TestHvacHistoryIsReadWholesale:
+    """`hvac_action` is an attribute, so state-change queries miss it.
+
+    A thermostat cycles idle -> cooling -> idle all night while its state sits
+    on `heat_cool` throughout: `last_updated` moves on every cycle but
+    `last_changed` does not. `state_changes_during_period()` returns
+    state-*value* changes, so against a real ecobee it saw two samples across a
+    week instead of dozens of compressor cycles. The filter silently did almost
+    nothing and the baseline reported the air conditioner rather than the
+    house.
+
+    The pure windowing logic could not catch this -- it was handed the samples
+    it was given and worked correctly on them. Only the choice of recorder call
+    was wrong, so that is what these pin.
+    """
+
+    def _source(self) -> str:
+        return (COMPONENT_DIR / "coordinator.py").read_text(encoding="utf-8")
+
+    def _imported_names(self) -> set[str]:
+        """Names imported from the recorder's history module.
+
+        Checked on the imports rather than the raw text: the docstring on
+        `_async_hvac_windows` names the broken call deliberately, to explain
+        why it is not used, and a grep cannot tell prose from code.
+        """
+        tree = ast.parse(self._source())
+        return {
+            alias.name
+            for node in ast.walk(tree)
+            if isinstance(node, ast.ImportFrom)
+            and node.module == "homeassistant.components.recorder.history"
+            for alias in node.names
+        }
+
+    def test_it_does_not_use_state_changes_during_period(self) -> None:
+        assert "state_changes_during_period" not in self._imported_names(), (
+            "state_changes_during_period() omits attribute-only rows, which is "
+            "every hvac_action transition there is"
+        )
+
+    def test_it_imports_the_wholesale_reader(self) -> None:
+        assert "get_significant_states" in self._imported_names()
+
+    def test_it_asks_for_insignificant_changes(self) -> None:
+        source = self._source()
+        assert "get_significant_states" in source
+        assert "significant_changes_only=False" in source, (
+            "without this the recorder filters back down to state changes and "
+            "the HVAC filter goes quiet again"
+        )
+
+    def test_it_asks_for_attributes(self) -> None:
+        """`hvac_action` lives in the attributes; dropping them drops the signal."""
+        assert "no_attributes=False" in self._source()
+
+    def test_it_reads_hvac_action(self) -> None:
+        source = self._source()
+        assert 'attributes.get("hvac_action")' in source
