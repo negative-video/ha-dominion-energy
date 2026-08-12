@@ -91,7 +91,7 @@ If you have several meters on one account, add the integration once per meter �
 
 Under "Configure" → **Usage insights**:
 
-- **Thermostats** — select your `climate` entities so the always-on baseline can ignore any half hour the heating or cooling was actually running. This matters most if you run air conditioning overnight: without it, the baseline measures your compressor rather than your house. Thermostats that report an *action* (`heating`, `cooling`, `idle`) give the best result; ones that only report a mode are treated as running whenever they are not `off`.
+- **Thermostats** — select your `climate` entities so the always-on baseline can ignore any half hour the heating or cooling was actually running. Without this the baseline measures your compressor rather than your house. Thermostats that report an *action* (`heating`, `cooling`, `idle`) give the best result; ones that only report a mode are treated as running whenever they are not `off`.
 - **Billing period budget** — what you would like to keep each bill under. Set it to add the budget sensors; leave it at 0 and they are not created at all.
 
 ## Sensors
@@ -120,13 +120,13 @@ Under "Configure" → **Usage insights**:
 
 | Entity | Description |
 |--------|-------------|
-| Always-on baseline | The median of each night's quietest half hour, as watts. Attributes carry the daily kWh it accounts for, an estimated monthly cost, and its share of a typical day. |
+| Always-on baseline | The median of each day's quietest half hour, as watts. The hours it looks in are picked from your own profile, not assumed — `quiet_hours` says which. Attributes also carry the daily kWh it accounts for, an estimated monthly cost, and its share of a typical day. |
 | Busiest hour | Averaged over the last 30 complete days. `hourly_average_kwh` is a 24-element list you can feed straight to a chart card. |
 | Unusual usage | `binary_sensor`, device class `problem`. Compares the latest complete day against the median of the same weekday over the previous four weeks. |
 
 The always-on baseline is the most directly actionable number here — it is the fridge, the network gear, the standby loads, everything you never switch off. A sudden jump in it usually means something broke rather than something changed.
 
-> **Note**: These need history to say anything. The baseline needs three usable nights, the busiest hour needs seven complete days, and unusual usage needs two prior same-weekdays. Until then they report `unknown` rather than guessing.
+> **Note**: These need history to say anything. The busiest hour needs seven complete days, the baseline needs that same profile plus three usable days of its own, and unusual usage needs two prior same-weekdays. Until then they report `unknown` rather than guessing.
 
 ### Budget (optional)
 

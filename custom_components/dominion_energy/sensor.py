@@ -21,6 +21,7 @@ from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 from .const import COST_MODE_SCHEDULE_1
 from .coordinator import DominionEnergyConfigEntry, DominionEnergyData
 from .entity import DominionEnergyEntity, resolve_identity
+from .insights import hour_label
 from .rates import (
     LATEST_SCHEDULE_EFFECTIVE_DATE,
     PeriodBill,
@@ -477,12 +478,19 @@ class DominionEnergySensor(DominionEnergyEntity, SensorEntity):
         if key == "baseline_load" and data.baseline is not None:
             baseline = data.baseline
             attrs["daily_kwh"] = baseline.daily_kwh
-            attrs["nights_sampled"] = baseline.nights
+            # Which hours it looked at, since those are picked per household
+            # rather than fixed. Both the numbers and the readable labels: an
+            # automation wants 10, a dashboard wants "10 AM".
+            attrs["quiet_hours"] = list(baseline.quiet_hours)
+            attrs["quiet_hours_label"] = ", ".join(
+                hour_label(hour) for hour in baseline.quiet_hours
+            )
+            attrs["days_sampled"] = baseline.days
             attrs["intervals_sampled"] = baseline.sampled_intervals
             attrs["intervals_excluded_hvac"] = baseline.excluded_intervals
             attrs["hvac_filtered"] = baseline.hvac_filtered
-            attrs["first_night"] = baseline.first_night.isoformat()
-            attrs["last_night"] = baseline.last_night.isoformat()
+            attrs["first_day"] = baseline.first_day.isoformat()
+            attrs["last_day"] = baseline.last_day.isoformat()
 
             rate = data.bill_forecast.derived_rate if data.bill_forecast else None
             if rate:

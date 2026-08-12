@@ -88,7 +88,7 @@ from .green_button import (
     to_hourly,
 )
 from .insights import (
-    BASELINE_NIGHTS,
+    BASELINE_DAYS,
     BaselineLoad,
     DayComparison,
     TimeWindow,
@@ -97,6 +97,7 @@ from .insights import (
     compare_to_typical_day,
     hvac_active_windows,
     merge_windows,
+    quietest_hours,
     usage_profile,
 )
 from .rates import (
@@ -839,12 +840,20 @@ class DominionEnergyCoordinator(DataUpdateCoordinator[DominionEnergyData]):
             profile = usage_profile(window_intervals, through=yesterday)
             day_comparison = compare_to_typical_day(window_intervals, day=yesterday)
 
-            hvac_windows = await self._async_hvac_windows(
-                yesterday - timedelta(days=BASELINE_NIGHTS - 1), yesterday
-            )
-            baseline = baseline_load(
-                window_intervals, through=yesterday, hvac_windows=hvac_windows
-            )
+            # The baseline is measured in whichever hours this household is
+            # habitually quietest, which only the profile knows -- so no
+            # profile, no baseline. Both need about a week of data anyway.
+            baseline = None
+            if profile is not None:
+                hvac_windows = await self._async_hvac_windows(
+                    yesterday - timedelta(days=BASELINE_DAYS - 1), yesterday
+                )
+                baseline = baseline_load(
+                    window_intervals,
+                    through=yesterday,
+                    quiet_hours=quietest_hours(profile),
+                    hvac_windows=hvac_windows,
+                )
 
             (
                 rate_check_estimated,

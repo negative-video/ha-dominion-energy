@@ -149,18 +149,17 @@ def usage_profile[IntervalT: UsageInterval](
 #: readings throughout, which is what turns a kWh reading into a power figure.
 INTERVAL_MINUTES = 30
 
-#: The overnight window the standing load is measured in, as local hours
-#: ``[start, end)``. Chosen to sit after the evening peak has finished and
-#: before any morning routine starts.
-BASELINE_START_HOUR = 0
-BASELINE_END_HOUR = 5
+#: How many hours of the day the standing load is measured across. Five gives
+#: ten candidate intervals a day -- enough that HVAC can take some and still
+#: leave a reading.
+BASELINE_QUIET_HOURS = 5
 
-#: Nights of history the baseline is taken across. A single night can be
-#: entirely covered by HVAC runtime; a week usually is not.
-BASELINE_NIGHTS = 7
+#: Days of history the baseline is taken across. A single day can be entirely
+#: covered by HVAC runtime; a week usually is not.
+BASELINE_DAYS = 7
 
-#: Below this many usable nights the baseline is not published.
-MIN_BASELINE_NIGHTS = 3
+#: Below this many usable days the baseline is not published.
+MIN_BASELINE_DAYS = 3
 
 #: ``hvac_action`` values that mean the system is drawing power right now.
 #: Note ``fan`` counts: an air handler is several hundred watts and is exactly
@@ -259,6 +258,30 @@ def _is_running(state: str | None, action: str | None) -> bool:
     return normalised != "off"
 
 
+def quietest_hours(
+    profile: UsageProfile, count: int = BASELINE_QUIET_HOURS
+) -> tuple[int, ...]:
+    """Return the hours of the day this household is habitually quietest.
+
+    Which hours those are is a fact about the household, not a constant. An
+    overnight window assumes the house is asleep and the HVAC is off, and gets
+    both wrong for anyone who cools at night: on a real meter, midnight was the
+    *second-heaviest* hour of the day and the quietest was 10 AM. Measuring a
+    standing load between midnight and 5 AM there produced 1508 W -- almost
+    exactly the household's average draw.
+
+    Taken from the 30-day profile rather than the baseline's own week, so the
+    window reflects a settled habit while the measurement stays current. The
+    hours need not be contiguous: they are candidate slots to look for a
+    minimum in, and scattering them only means HVAC has to cover more of the
+    day to blank the reading.
+
+    Returned in clock order, which is how they read on a dashboard.
+    """
+    ranked = sorted(range(24), key=lambda hour: profile.hourly_average[hour])
+    return tuple(sorted(ranked[: max(count, 1)]))
+
+
 @dataclass(frozen=True)
 class BaselineLoad:
     """What the house draws when nothing in particular is happening."""
@@ -267,59 +290,67 @@ class BaselineLoad:
     watts: float
     #: kWh the standing draw accounts for over a full day.
     daily_kwh: float
-    nights: int
+    #: The hours of the day it was measured in.
+    quiet_hours: tuple[int, ...]
+    days: int
     sampled_intervals: int
     excluded_intervals: int
     #: Whether any HVAC runtime was actually excluded, so the sensor can say
     #: whether the number is thermostat-aware or raw.
     hvac_filtered: bool
-    first_night: date
-    last_night: date
+    first_day: date
+    last_day: date
 
 
 def baseline_load[IntervalT: UsageInterval](
     intervals: Sequence[IntervalT],
     *,
     through: date,
+    quiet_hours: Sequence[int],
     hvac_windows: Sequence[TimeWindow] = (),
-    nights: int = BASELINE_NIGHTS,
-    start_hour: int = BASELINE_START_HOUR,
-    end_hour: int = BASELINE_END_HOUR,
-    min_nights: int = MIN_BASELINE_NIGHTS,
+    days: int = BASELINE_DAYS,
+    min_days: int = MIN_BASELINE_DAYS,
 ) -> BaselineLoad | None:
     """Measure the household's standing draw from its quietest half-hours.
 
-    The quietest overnight interval is the closest an interval meter gets to
+    The quietest interval of the day is the closest an interval meter gets to
     "everything that is always on": the fridge, the network gear, the standby
     loads, the well pump's controller. It is one of the few numbers this data
     can produce that a person can act on directly.
 
-    Two things make it trustworthy rather than merely plausible:
+    Three things make it trustworthy rather than merely plausible:
 
+    - **The hours come from the household**, via `quietest_hours()`, rather
+      than from an assumption about when people sleep. See that function for
+      what assuming overnight cost.
     - **Any interval overlapping HVAC runtime is discarded.** A compressor
-      cycling through the night otherwise sets the floor, and the sensor
+      cycling through the quiet hours otherwise sets the floor, and the sensor
       reports the air conditioner instead of the house. This is why the
       thermostats are worth configuring.
-    - **The lowest interval of each night, then the median across nights.**
-      A single night can be fully covered by HVAC or spoilt by one odd
-      reading; the median across a week is not.
+    - **The lowest interval of each day, then the median across days.** A
+      single day can be fully covered by HVAC or spoilt by one odd reading;
+      the median across a week is not.
 
-    Returns None when fewer than ``min_nights`` nights have a usable interval
-    -- which on a week of continuous air conditioning is the honest answer, and
-    is why `excluded_intervals` is reported alongside.
+    Returns None when fewer than ``min_days`` days have a usable interval --
+    which under continuous air conditioning is the honest answer, and is why
+    `excluded_intervals` is reported alongside.
     """
     per_interval = timedelta(minutes=INTERVAL_MINUTES)
-    by_day = complete_days_by_date(intervals, through=through, days=nights)
+    wanted = set(quiet_hours)
+    if not wanted:
+        return None
 
-    nightly_minima: list[float] = []
+    by_day = complete_days_by_date(intervals, through=through, days=days)
+
+    daily_minima: list[float] = []
     sampled = 0
     excluded = 0
     used_days: list[date] = []
 
     for day, rows in by_day.items():
-        overnight = [row for row in rows if start_hour <= row.timestamp.hour < end_hour]
+        candidates = [row for row in rows if row.timestamp.hour in wanted]
         clean = []
-        for row in overnight:
+        for row in candidates:
             row_end = row.timestamp + per_interval
             if any(w.overlaps(row.timestamp, row_end) for w in hvac_windows):
                 excluded += 1
@@ -330,24 +361,25 @@ def baseline_load[IntervalT: UsageInterval](
             continue
         sampled += len(clean)
         used_days.append(day)
-        nightly_minima.append(min(row.consumption for row in clean))
+        daily_minima.append(min(row.consumption for row in clean))
 
-    if len(nightly_minima) < min_nights:
+    if len(daily_minima) < min_days:
         return None
 
     # kWh in half an hour -> kW -> W.
-    kwh_per_interval = median(nightly_minima)
+    kwh_per_interval = median(daily_minima)
     watts = kwh_per_interval * (60 / INTERVAL_MINUTES) * 1000
 
     return BaselineLoad(
         watts=round(watts, 1),
         daily_kwh=round(kwh_per_interval * (60 / INTERVAL_MINUTES) * 24, 3),
-        nights=len(nightly_minima),
+        quiet_hours=tuple(sorted(wanted)),
+        days=len(daily_minima),
         sampled_intervals=sampled,
         excluded_intervals=excluded,
         hvac_filtered=excluded > 0,
-        first_night=min(used_days),
-        last_night=max(used_days),
+        first_day=min(used_days),
+        last_day=max(used_days),
     )
 
 
@@ -440,14 +472,13 @@ def compare_to_typical_day[IntervalT: UsageInterval](
 
 
 __all__ = [
-    "BASELINE_END_HOUR",
-    "BASELINE_NIGHTS",
-    "BASELINE_START_HOUR",
+    "BASELINE_DAYS",
+    "BASELINE_QUIET_HOURS",
     "COMPARISON_WEEKS",
     "HVAC_QUIET_ACTIONS",
     "HVAC_RUNNING_ACTIONS",
     "INTERVAL_MINUTES",
-    "MIN_BASELINE_NIGHTS",
+    "MIN_BASELINE_DAYS",
     "MIN_COMPARISON_DAYS",
     "MIN_PROFILE_DAYS",
     "PROFILE_DAYS",
@@ -462,5 +493,6 @@ __all__ = [
     "hour_label",
     "hvac_active_windows",
     "merge_windows",
+    "quietest_hours",
     "usage_profile",
 ]

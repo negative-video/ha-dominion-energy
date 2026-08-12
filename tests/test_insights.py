@@ -53,10 +53,11 @@ def _load_pure_package() -> types.ModuleType:
 
 insights = _load_pure_package()
 
-BASELINE_END_HOUR = insights.BASELINE_END_HOUR
-BASELINE_NIGHTS = insights.BASELINE_NIGHTS
-MIN_BASELINE_NIGHTS = insights.MIN_BASELINE_NIGHTS
+BASELINE_DAYS = insights.BASELINE_DAYS
+BASELINE_QUIET_HOURS = insights.BASELINE_QUIET_HOURS
+MIN_BASELINE_DAYS = insights.MIN_BASELINE_DAYS
 MIN_PROFILE_DAYS = insights.MIN_PROFILE_DAYS
+quietest_hours = insights.quietest_hours
 UNUSUAL_DAY_THRESHOLD = insights.UNUSUAL_DAY_THRESHOLD
 TimeWindow = insights.TimeWindow
 baseline_load = insights.baseline_load
@@ -548,175 +549,260 @@ class TestHvacActiveWindows:
         )
 
 
+class TestQuietestHours:
+    """Which hours count as quiet is a fact about the household."""
+
+    def _profile(self, shape: dict[int, float], *, base: float = 2.0):
+        rows = make_days(LAST_DAY, 14, shape=shape, consumption=base)
+        profile = usage_profile(rows, through=LAST_DAY)
+        assert profile is not None
+        return profile
+
+    def test_it_picks_the_lowest_hours(self) -> None:
+        quiet = {9: 0.1, 10: 0.1, 11: 0.1, 12: 0.1, 13: 0.1}
+        assert quietest_hours(self._profile(quiet)) == (9, 10, 11, 12, 13)
+
+    def test_it_returns_the_requested_count(self) -> None:
+        profile = self._profile({h: h / 100 for h in range(24)})
+        assert len(quietest_hours(profile, count=3)) == 3
+        assert len(quietest_hours(profile, count=8)) == 8
+
+    def test_it_defaults_to_the_documented_count(self) -> None:
+        profile = self._profile({h: h / 100 for h in range(24)})
+        assert len(quietest_hours(profile)) == BASELINE_QUIET_HOURS
+
+    def test_hours_come_back_in_clock_order(self) -> None:
+        """They are picked by usage but read on a dashboard."""
+        profile = self._profile({22: 0.1, 3: 0.1, 14: 0.1, 7: 0.1, 19: 0.1})
+        assert list(quietest_hours(profile)) == sorted(quietest_hours(profile))
+
+    def test_a_night_heavy_household_does_not_get_an_overnight_window(self) -> None:
+        """The real meter this was found on: midnight was its 2nd-busiest hour.
+
+        Cooling overnight inverts the profile. Assuming 00:00-05:00 measured a
+        standing load right through the household's peak.
+        """
+        night_heavy = {0: 4.7, 1: 4.0, 2: 3.2, 3: 2.9, 4: 2.5, 23: 4.8, 22: 4.7}
+        quiet = quietest_hours(self._profile(night_heavy, base=1.4))
+        assert not set(quiet) & {0, 1, 2, 3, 4, 22, 23}
+
+    def test_count_is_never_zero(self) -> None:
+        """A zero window would silently blank the sensor forever."""
+        profile = self._profile({h: h / 100 for h in range(24)})
+        assert len(quietest_hours(profile, count=0)) == 1
+
+
 class TestBaselineLoad:
     """The standing draw, and the reason the thermostats matter."""
 
-    def _nights(
+    #: A mid-morning quiet window, as a household that is out all day would have.
+    QUIET = (9, 10, 11, 12, 13)
+
+    def _days(
         self,
         *,
-        overnight_kwh: float,
-        daytime_kwh: float = 2.0,
-        count: int = BASELINE_NIGHTS,
+        quiet_kwh: float,
+        busy_kwh: float = 2.0,
+        count: int = BASELINE_DAYS,
     ) -> list[FakeInterval]:
-        """Days whose overnight hours are quiet and whose days are not."""
+        """Days whose quiet hours are quiet and whose other hours are not."""
         rows: list[FakeInterval] = []
         for offset in range(count):
             day = LAST_DAY - timedelta(days=offset)
             rows.extend(
                 make_day(
                     day,
-                    shape={h: overnight_kwh for h in range(BASELINE_END_HOUR)},
-                    consumption=daytime_kwh,
+                    shape={h: quiet_kwh for h in self.QUIET},
+                    consumption=busy_kwh,
                 )
             )
         return rows
 
-    def test_it_measures_the_quietest_overnight_half_hour(self) -> None:
+    def test_it_measures_the_quietest_half_hour(self) -> None:
         """0.2 kWh in half an hour is 400 W."""
-        baseline = baseline_load(self._nights(overnight_kwh=0.2), through=LAST_DAY)
+        baseline = baseline_load(
+            self._days(quiet_kwh=0.2), through=LAST_DAY, quiet_hours=self.QUIET
+        )
         assert baseline is not None
         assert baseline.watts == pytest.approx(400.0)
 
     def test_it_reports_the_daily_energy_that_implies(self) -> None:
-        baseline = baseline_load(self._nights(overnight_kwh=0.2), through=LAST_DAY)
+        baseline = baseline_load(
+            self._days(quiet_kwh=0.2), through=LAST_DAY, quiet_hours=self.QUIET
+        )
         assert baseline is not None
         assert baseline.daily_kwh == pytest.approx(9.6)
 
-    def test_daytime_usage_does_not_raise_it(self) -> None:
-        """The evening peak is exactly what the overnight window excludes."""
+    def test_busy_hours_do_not_raise_it(self) -> None:
         quiet = baseline_load(
-            self._nights(overnight_kwh=0.2, daytime_kwh=2.0), through=LAST_DAY
+            self._days(quiet_kwh=0.2, busy_kwh=2.0),
+            through=LAST_DAY,
+            quiet_hours=self.QUIET,
         )
         busy = baseline_load(
-            self._nights(overnight_kwh=0.2, daytime_kwh=9.0), through=LAST_DAY
+            self._days(quiet_kwh=0.2, busy_kwh=9.0),
+            through=LAST_DAY,
+            quiet_hours=self.QUIET,
         )
         assert quiet is not None and busy is not None
         assert quiet.watts == pytest.approx(busy.watts)
 
+    def test_it_reports_the_hours_it_used(self) -> None:
+        """They vary per household, so the sensor has to say which."""
+        baseline = baseline_load(
+            self._days(quiet_kwh=0.2), through=LAST_DAY, quiet_hours=self.QUIET
+        )
+        assert baseline is not None
+        assert baseline.quiet_hours == self.QUIET
+
+    def test_it_honours_a_non_contiguous_window(self) -> None:
+        """Quiet hours are candidate slots, not a block; gaps are fine."""
+        hours = (2, 10, 15)
+        rows: list[FakeInterval] = []
+        for offset in range(BASELINE_DAYS):
+            day = LAST_DAY - timedelta(days=offset)
+            rows.extend(make_day(day, shape={h: 0.2 for h in hours}, consumption=3.0))
+        baseline = baseline_load(rows, through=LAST_DAY, quiet_hours=hours)
+        assert baseline is not None
+        assert baseline.watts == pytest.approx(400.0)
+        assert baseline.sampled_intervals == BASELINE_DAYS * len(hours) * 2
+
     def test_without_thermostats_a_running_ac_sets_the_floor(self) -> None:
-        """The failure this feature exists to fix, pinned as a contrast case."""
-        rows = self._nights(overnight_kwh=1.5)
-        baseline = baseline_load(rows, through=LAST_DAY)
+        """The failure the filter exists to fix, pinned as a contrast case."""
+        baseline = baseline_load(
+            self._days(quiet_kwh=1.5), through=LAST_DAY, quiet_hours=self.QUIET
+        )
         assert baseline is not None
         assert baseline.watts == pytest.approx(3000.0)
         assert baseline.hvac_filtered is False
 
     def test_excluding_hvac_runtime_uncovers_the_real_baseline(self) -> None:
-        """Same nights, but the compressor ran from midnight to 4 AM.
-
-        The remaining 4-5 AM hour is the only honest reading, and it is the
-        one the sensor should report.
-        """
+        """The compressor ran through all but the last quiet hour."""
         rows: list[FakeInterval] = []
         windows: list[TimeWindow] = []
-        for offset in range(BASELINE_NIGHTS):
+        for offset in range(BASELINE_DAYS):
             day = LAST_DAY - timedelta(days=offset)
             rows.extend(
                 make_day(
                     day,
-                    shape={0: 1.5, 1: 1.5, 2: 1.5, 3: 1.5, 4: 0.2},
+                    shape={9: 1.5, 10: 1.5, 11: 1.5, 12: 1.5, 13: 0.2},
                     consumption=2.0,
                 )
             )
-            windows.append(TimeWindow(at(day, 0), at(day, 4)))
+            windows.append(TimeWindow(at(day, 9), at(day, 13)))
 
-        baseline = baseline_load(rows, through=LAST_DAY, hvac_windows=windows)
+        baseline = baseline_load(
+            rows, through=LAST_DAY, quiet_hours=self.QUIET, hvac_windows=windows
+        )
         assert baseline is not None
         assert baseline.watts == pytest.approx(400.0)
         assert baseline.hvac_filtered is True
-        assert baseline.excluded_intervals == BASELINE_NIGHTS * 8
+        assert baseline.excluded_intervals == BASELINE_DAYS * 8
 
     def test_a_partial_overlap_still_excludes_the_interval(self) -> None:
-        """A compressor running for ten minutes contaminates the whole half hour."""
+        """Ten minutes of compressor contaminates the whole half hour."""
         rows: list[FakeInterval] = []
         windows: list[TimeWindow] = []
-        for offset in range(BASELINE_NIGHTS):
+        for offset in range(BASELINE_DAYS):
             day = LAST_DAY - timedelta(days=offset)
             rows.extend(
                 make_day(
-                    day, shape={0: 1.5, 1: 0.2, 2: 0.2, 3: 0.2, 4: 0.2}, consumption=2.0
+                    day,
+                    shape={9: 1.5, 10: 0.2, 11: 0.2, 12: 0.2, 13: 0.2},
+                    consumption=2.0,
                 )
             )
-            # Ten minutes inside the 00:00 interval only.
-            windows.append(TimeWindow(at(day, 0, 10), at(day, 0, 20)))
+            windows.append(TimeWindow(at(day, 9, 10), at(day, 9, 20)))
 
-        baseline = baseline_load(rows, through=LAST_DAY, hvac_windows=windows)
+        baseline = baseline_load(
+            rows, through=LAST_DAY, quiet_hours=self.QUIET, hvac_windows=windows
+        )
         assert baseline is not None
-        assert baseline.excluded_intervals == BASELINE_NIGHTS
+        assert baseline.excluded_intervals == BASELINE_DAYS
         assert baseline.watts == pytest.approx(400.0)
 
-    def test_a_night_fully_covered_by_hvac_is_skipped_not_zeroed(self) -> None:
-        """Four usable nights out of seven still answers the question."""
+    def test_a_day_fully_covered_by_hvac_is_skipped_not_zeroed(self) -> None:
         rows: list[FakeInterval] = []
         windows: list[TimeWindow] = []
-        for offset in range(BASELINE_NIGHTS):
+        for offset in range(BASELINE_DAYS):
             day = LAST_DAY - timedelta(days=offset)
             rows.extend(
-                make_day(day, shape={h: 0.2 for h in range(5)}, consumption=2.0)
+                make_day(day, shape={h: 0.2 for h in self.QUIET}, consumption=2.0)
             )
             if offset < 3:
-                windows.append(TimeWindow(at(day, 0), at(day, 5)))
+                windows.append(TimeWindow(at(day, 9), at(day, 14)))
 
-        baseline = baseline_load(rows, through=LAST_DAY, hvac_windows=windows)
+        baseline = baseline_load(
+            rows, through=LAST_DAY, quiet_hours=self.QUIET, hvac_windows=windows
+        )
         assert baseline is not None
-        assert baseline.nights == BASELINE_NIGHTS - 3
+        assert baseline.days == BASELINE_DAYS - 3
         assert baseline.watts == pytest.approx(400.0)
 
-    def test_every_night_covered_reports_nothing(self) -> None:
-        """A week of continuous air conditioning has no baseline to show."""
+    def test_every_day_covered_reports_nothing(self) -> None:
+        """Continuous air conditioning leaves no baseline to show."""
         rows: list[FakeInterval] = []
         windows: list[TimeWindow] = []
-        for offset in range(BASELINE_NIGHTS):
+        for offset in range(BASELINE_DAYS):
             day = LAST_DAY - timedelta(days=offset)
             rows.extend(make_day(day, consumption=1.5))
-            windows.append(TimeWindow(at(day, 0), at(day, 5)))
+            # Midnight to midnight, so no quiet hour survives.
+            windows.append(TimeWindow(at(day, 0), at(day + timedelta(days=1), 0)))
 
-        assert baseline_load(rows, through=LAST_DAY, hvac_windows=windows) is None
-
-    def test_one_odd_night_does_not_move_the_median(self) -> None:
-        rows = self._nights(overnight_kwh=0.2)
-        rows = [r for r in rows if r.timestamp.date() != LAST_DAY]
-        rows.extend(
-            make_day(LAST_DAY, shape={h: 0.01 for h in range(5)}, consumption=2.0)
+        assert (
+            baseline_load(
+                rows, through=LAST_DAY, quiet_hours=self.QUIET, hvac_windows=windows
+            )
+            is None
         )
 
-        baseline = baseline_load(rows, through=LAST_DAY)
+    def test_one_odd_day_does_not_move_the_median(self) -> None:
+        rows = self._days(quiet_kwh=0.2)
+        rows = [r for r in rows if r.timestamp.date() != LAST_DAY]
+        rows.extend(
+            make_day(LAST_DAY, shape={h: 0.01 for h in self.QUIET}, consumption=2.0)
+        )
+        baseline = baseline_load(rows, through=LAST_DAY, quiet_hours=self.QUIET)
         assert baseline is not None
         assert baseline.watts == pytest.approx(400.0)
 
-    def test_too_few_nights_reports_nothing(self) -> None:
-        rows = self._nights(overnight_kwh=0.2, count=MIN_BASELINE_NIGHTS - 1)
-        assert baseline_load(rows, through=LAST_DAY) is None
+    def test_too_few_days_reports_nothing(self) -> None:
+        rows = self._days(quiet_kwh=0.2, count=MIN_BASELINE_DAYS - 1)
+        assert baseline_load(rows, through=LAST_DAY, quiet_hours=self.QUIET) is None
 
-    def test_the_minimum_is_exactly_min_baseline_nights(self) -> None:
-        rows = self._nights(overnight_kwh=0.2, count=MIN_BASELINE_NIGHTS)
-        assert baseline_load(rows, through=LAST_DAY) is not None
+    def test_the_minimum_is_exactly_min_baseline_days(self) -> None:
+        rows = self._days(quiet_kwh=0.2, count=MIN_BASELINE_DAYS)
+        assert baseline_load(rows, through=LAST_DAY, quiet_hours=self.QUIET) is not None
 
-    def test_it_reports_the_nights_it_used(self) -> None:
-        baseline = baseline_load(self._nights(overnight_kwh=0.2), through=LAST_DAY)
+    def test_it_reports_the_days_it_used(self) -> None:
+        baseline = baseline_load(
+            self._days(quiet_kwh=0.2), through=LAST_DAY, quiet_hours=self.QUIET
+        )
         assert baseline is not None
-        assert baseline.last_night == LAST_DAY
-        assert baseline.first_night == LAST_DAY - timedelta(days=BASELINE_NIGHTS - 1)
-        assert baseline.sampled_intervals == BASELINE_NIGHTS * BASELINE_END_HOUR * 2
+        assert baseline.last_day == LAST_DAY
+        assert baseline.first_day == LAST_DAY - timedelta(days=BASELINE_DAYS - 1)
+        assert baseline.sampled_intervals == BASELINE_DAYS * len(self.QUIET) * 2
 
     def test_incomplete_days_are_not_sampled(self) -> None:
-        """A partly published day's missing hours are not quiet hours.
-
-        Two intervals of a barely-started day would otherwise be treated as
-        that night's minimum and drag the median down.
-        """
+        """A barely-started day's few intervals are not a quiet period."""
         rows: list[FakeInterval] = []
-        for offset in range(1, BASELINE_NIGHTS):
+        for offset in range(1, BASELINE_DAYS):
             day = LAST_DAY - timedelta(days=offset)
             rows.extend(
-                make_day(day, shape={h: 0.2 for h in range(5)}, consumption=2.0)
+                make_day(day, shape={h: 0.2 for h in self.QUIET}, consumption=2.0)
             )
-        rows.extend(make_day(LAST_DAY, count=4, shape={0: 0.001}))
+        rows.extend(make_day(LAST_DAY, count=24, shape={9: 0.001, 10: 0.001}))
 
-        baseline = baseline_load(rows, through=LAST_DAY)
+        baseline = baseline_load(rows, through=LAST_DAY, quiet_hours=self.QUIET)
         assert baseline is not None
-        assert baseline.last_night == LAST_DAY - timedelta(days=1)
+        assert baseline.last_day == LAST_DAY - timedelta(days=1)
         assert baseline.watts == pytest.approx(400.0)
 
+    def test_an_empty_window_reports_nothing(self) -> None:
+        assert (
+            baseline_load(self._days(quiet_kwh=0.2), through=LAST_DAY, quiet_hours=())
+            is None
+        )
+
     def test_empty_input_reports_nothing(self) -> None:
-        assert baseline_load([], through=LAST_DAY) is None
+        assert baseline_load([], through=LAST_DAY, quiet_hours=self.QUIET) is None
