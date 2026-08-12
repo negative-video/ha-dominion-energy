@@ -10,5 +10,5 @@
   "requirements": [
     "https://github.com/negative-video/dompower/releases/download/v0.3.0/dompower-0.3.0-py3-none-any.whl#dompower==0.3.0"
   ],
-  "version": "1.5.4"
+  "version": "1.5.5"
 }
