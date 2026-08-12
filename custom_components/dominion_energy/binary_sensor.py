@@ -70,10 +70,15 @@ def _over_budget_attributes(data: DominionEnergyData) -> dict[str, Any]:
         "remaining": data.budget_remaining,
         "percent_used": data.budget_used,
     }
-    # How long is left to do something about it.
-    if data.bill_forecast is not None and data.data_date is not None:
+    # How long is left to do something about it. `period_end_date`, not the
+    # raw forecast field, for the same reason the billing_period_end sensor
+    # uses it: the API reports a period that is still running as ending today,
+    # which reads as nothing left to do something about. From dompower 0.3 the
+    # field can also be None outright - the library no longer substitutes
+    # today's date for one the API omitted - and subtracting that raises.
+    if data.period_end_date is not None and data.data_date is not None:
         attrs["days_left_in_period"] = max(
-            (data.bill_forecast.current_period_end - data.data_date).days, 0
+            (data.period_end_date - data.data_date).days, 0
         )
     if data.projected_period_cost is not None and data.period_budget > 0:
         attrs["projected_over_by_percent"] = round(

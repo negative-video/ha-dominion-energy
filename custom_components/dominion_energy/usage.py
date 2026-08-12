@@ -145,8 +145,11 @@ def billing_period_end(
 
     Overloaded because the only way out with no end date is having no start
     date either: given a real ``period_start`` a real end always comes back,
-    and callers holding a `BillForecast` -- whose period bounds are plain
-    ``date`` -- should not have to assert that.
+    so a caller that has already established its start should not have to
+    assert the result again. `BillForecast`'s own bounds are ``date | None``
+    from `dompower` 0.3 onwards -- the library stopped substituting today's
+    date for a bound the API omitted -- so that establishing step is now the
+    caller's job rather than something the type hands them for free.
 
     An untrustworthy end is replaced by the start plus ``default`` days, so the
     period keeps a full cycle's length instead of stopping at today.

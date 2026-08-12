@@ -1187,11 +1187,18 @@ class DominionEnergyCoordinator(DataUpdateCoordinator[DominionEnergyData]):
         """
         if projected_usage is None or bill_forecast is None:
             return None
+        # `dompower` reports a period bound the API omitted as None rather
+        # than substituting today's date. Without a start there is no midpoint
+        # and so no season and no rate schedule; a breakdown built off a
+        # guessed one would be worse than no breakdown.
+        period_start = bill_forecast.current_period_start
+        if period_start is None:
+            return None
         return calculate_schedule1_period_bill(
             projected_usage,
-            bill_forecast.current_period_start,
+            period_start,
             billing_period_end(
-                bill_forecast.current_period_start,
+                period_start,
                 bill_forecast.current_period_end,
                 DEFAULT_BILLING_PERIOD_DAYS,
                 today,
@@ -1240,6 +1247,11 @@ class DominionEnergyCoordinator(DataUpdateCoordinator[DominionEnergyData]):
             # current one starts is a good enough stand-in for picking the
             # season and the effective rate schedule.
             period_end = bill_forecast.current_period_start
+            if period_end is None:
+                # Nor the current period's start: there is no date anywhere in
+                # this forecast to hang a season off, and rate_check() would
+                # refuse the same way one step later.
+                return None, None, None
             period_start = shift_months(period_end, -1)
 
         return rate_check(last_bill.charges, last_bill.usage, period_start, period_end)
