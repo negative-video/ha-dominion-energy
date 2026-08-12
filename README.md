@@ -114,7 +114,7 @@ Under "Configure" → **Usage insights**:
 | Always-on baseline | Standing draw when nothing is running (W) | measurement |
 | Busiest hour | The hour of the day the house uses most, e.g. `6 PM` | — |
 
-**Projected billing period cost** carries the bill's line items as attributes — `distribution_charge`, `generation_charge`, `rider_charges`, `transmission_charge`, `consumption_tax` and `customer_charge` — so you can see *why* a bill moved when your usage did not. These are always priced with the full Schedule 1 tariff; `breakdown_matches_state` tells you whether they add up to the sensor's own value or sit alongside it (they only match in Schedule 1 cost mode).
+**Projected billing period cost** carries the bill's line items as attributes — `distribution_charge`, `generation_charge`, `transmission_charge`, `fuel_charge`, `taxes_and_fees` and `customer_charge` — so you can see *why* a bill moved when your usage did not. These are the sections Dominion prints, so each rider is folded into the charge it is recovered under rather than lumped into one opaque "riders" line. These are always priced with the full Schedule 1 tariff; `breakdown_matches_state` tells you whether they add up to the sensor's own value or sit alongside it (they only match in Schedule 1 cost mode).
 
 ### Understanding your usage
 

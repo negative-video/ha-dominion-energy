@@ -26,6 +26,32 @@ class Season(Enum):
     WINTER = "winter"  # Oct-May
 
 
+class RiderCategory(Enum):
+    """Which section of the printed bill a rider is recovered under.
+
+    Dominion's own bill calculator (source [4], "Rate Worksheet" tab) does not
+    show a "riders" line: it spreads the seventeen riders across the four
+    sections a customer actually sees, and every one of them is applied flat to
+    total kWh. Summing them into a single bucket is arithmetically correct but
+    reads as implausible -- on the current schedule the bucket is 10.0 c/kWh,
+    which looks like a modelling error until you notice it contains the fuel
+    factor (3.76 c/kWh, its own line on the bill) and Rider T1 (1.18 c/kWh,
+    which the bill prints under Transmission).
+
+    This is the bill's *display* grouping, which is not the same as the
+    tariff's rate-basis split (whether a rider is stated per distribution kWh
+    or per Electricity Supply kWh) -- see docs/rate-schedules.md. Only the
+    display grouping is modelled here, because that is what a breakdown is
+    read against.
+    """
+
+    DISTRIBUTION = "distribution"  # Bill section A, "Applicable Rider(s)"
+    SUPPLY = "supply"  # Bill section B.2, under Generation
+    TRANSMISSION = "transmission"  # Bill section B.3, with the transmission charge
+    FUEL = "fuel"  # Bill section B.4, Rider A on its own
+    TAXES_AND_FEES = "taxes_and_fees"  # Bill section C
+
+
 @dataclass(frozen=True)
 class TieredRate:
     """Rate with a kWh boundary (e.g., first 800 kWh vs. over 800 kWh)."""
@@ -45,10 +71,16 @@ class SeasonalTieredRates:
 
 @dataclass(frozen=True)
 class FlatRider:
-    """A flat per-kWh rider/surcharge."""
+    """A flat per-kWh rider/surcharge.
+
+    Every Schedule 1 rider is flat: Dominion's calculator multiplies each one
+    by the period's total kWh, with no tier boundary. Only the base
+    distribution and generation charges are tiered.
+    """
 
     name: str
     rate: float  # $/kWh
+    category: RiderCategory
 
 
 @dataclass(frozen=True)
@@ -85,6 +117,10 @@ class RateSchedule:
     def total_rider_rate(self) -> float:
         """Sum of all flat per-kWh riders, in $/kWh."""
         return sum(rider.rate for rider in self.riders)
+
+    def rider_rate(self, category: RiderCategory) -> float:
+        """Sum of the flat per-kWh riders in one bill section, in $/kWh."""
+        return sum(rider.rate for rider in self.riders if rider.category is category)
 
 
 # ---------------------------------------------------------------------------
@@ -147,24 +183,29 @@ _CONSUMPTION_TAX_TIERS = [
 ]
 
 # Riders in effect on 2026-01-01, from the 2025-12-19 worksheet copy in docs/.
-# Rates are $/kWh; the worksheet states them in cents/kWh.
+# Rates are $/kWh; the worksheet states them in cents/kWh (the "Sales&Use"
+# surcharge is the one already stated in $/kWh -- cell AB4, unit "/kwh").
+#
+# The category on each is the bill section the worksheet's "Rate Worksheet" tab
+# prints it under: rows 24-28 are section A, rows 37-44 section B.2, rows 47-48
+# section B.3, row 51 section B.4, rows 57-62 section C.
 _RIDERS_2026_01_01 = [
-    FlatRider("C1A", 0.000231),
-    FlatRider("C4A", 0.001336),
-    FlatRider("DIST", 0.006241),
-    FlatRider("RBB", 0.000531),
-    FlatRider("E", 0.000625),
-    FlatRider("GEN", 0.007564),
-    FlatRider("SMR", 0.000287),
-    FlatRider("SNA", 0.003475),
-    FlatRider("CCR", 0.001765),
-    FlatRider("CE", 0.003668),
-    FlatRider("OSW", 0.011229),
-    FlatRider("RPS", 0.007676),
-    FlatRider("T1", 0.011789),
-    FlatRider("Fuel/A", 0.02968),
-    FlatRider("DFCC", 0.002906),
-    FlatRider("Sales&Use", 0.000921),
+    FlatRider("C1A", 0.000231, RiderCategory.DISTRIBUTION),
+    FlatRider("C4A", 0.001336, RiderCategory.DISTRIBUTION),
+    FlatRider("DIST", 0.006241, RiderCategory.DISTRIBUTION),
+    FlatRider("RBB", 0.000531, RiderCategory.DISTRIBUTION),
+    FlatRider("E", 0.000625, RiderCategory.SUPPLY),
+    FlatRider("GEN", 0.007564, RiderCategory.SUPPLY),
+    FlatRider("SMR", 0.000287, RiderCategory.SUPPLY),
+    FlatRider("SNA", 0.003475, RiderCategory.SUPPLY),
+    FlatRider("CCR", 0.001765, RiderCategory.SUPPLY),
+    FlatRider("CE", 0.003668, RiderCategory.SUPPLY),
+    FlatRider("OSW", 0.011229, RiderCategory.SUPPLY),
+    FlatRider("RPS", 0.007676, RiderCategory.SUPPLY),
+    FlatRider("T1", 0.011789, RiderCategory.TRANSMISSION),
+    FlatRider("Fuel/A", 0.02968, RiderCategory.FUEL),
+    FlatRider("DFCC", 0.002906, RiderCategory.TAXES_AND_FEES),
+    FlatRider("Sales&Use", 0.000921, RiderCategory.TAXES_AND_FEES),
 ]
 
 # Riders Dominion lists at 0.000 for Schedule 1 (PIPP, RGGI) are omitted; they
@@ -180,7 +221,7 @@ _RETRIEVED = "2026-08-11"
 def _riders(
     base: list[FlatRider],
     changed: dict[str, float] | None = None,
-    added: dict[str, float] | None = None,
+    added: dict[str, tuple[float, RiderCategory]] | None = None,
 ) -> list[FlatRider]:
     """Build a rider list from `base` by re-rating and/or adding riders.
 
@@ -188,7 +229,9 @@ def _riders(
         base: The rider list to start from.
         changed: Rider name -> new $/kWh rate. Every name must already exist in
             `base`; a `KeyError` here means a typo rather than a real change.
-        added: Rider name -> $/kWh rate for riders that did not exist in `base`.
+            A re-rated rider keeps the category it already had.
+        added: Rider name -> (rate in $/kWh, bill section) for riders that did
+            not exist in `base`.
 
     Returns:
         A new rider list. `base` is left untouched.
@@ -203,9 +246,12 @@ def _riders(
         raise KeyError(f"Rider(s) in `added` already exist: {sorted(clashing)}")
 
     result = [
-        FlatRider(rider.name, changed.get(rider.name, rider.rate)) for rider in base
+        FlatRider(rider.name, changed.get(rider.name, rider.rate), rider.category)
+        for rider in base
     ]
-    result.extend(FlatRider(name, rate) for name, rate in added.items())
+    result.extend(
+        FlatRider(name, rate, category) for name, (rate, category) in added.items()
+    )
     return result
 
 
@@ -240,8 +286,9 @@ def _schedule(
 _RIDERS_2026_03_01 = _riders(
     _RIDERS_2026_01_01,
     # Rider CERC (Chesterfield Energy Reliability Center) is new; source [3]
-    # lists it "Effective for Usage On and After 03-01-26".
-    added={"CERC": 0.000754},
+    # lists it "Effective for Usage On and After 03-01-26". A generation
+    # facility, so it is recovered through Electricity Supply.
+    added={"CERC": (0.000754, RiderCategory.SUPPLY)},
 )
 _RIDERS_2026_04_01 = _riders(_RIDERS_2026_03_01, changed={"GEN": 0.005729})
 _RIDERS_2026_05_01 = _riders(_RIDERS_2026_04_01, changed={"CE": 0.006054})
@@ -505,10 +552,18 @@ class PeriodBill:
 
     total: float
     customer_charge: float
+    # Base tariff charges, before the riders recovered alongside each.
     distribution: float
     generation: float
     transmission: float
+    # Riders, split by the bill section that prints them. `riders` is their
+    # total and is what `RateSchedule.total_rider_rate` prices.
     riders: float
+    distribution_riders: float
+    supply_riders: float
+    transmission_riders: float
+    fuel: float
+    taxes_and_fees_riders: float
     consumption_tax: float
     total_kwh: float
     season: Season
@@ -518,9 +573,22 @@ class PeriodBill:
     def components(self) -> dict[str, float]:
         """Return the bill's line items in dollars, rounded to cents.
 
-        Keyed for display rather than by attribute name: ``generation`` is the
-        generation *charge* here, which would otherwise read as solar export
-        next to this integration's generation sensors.
+        The keys mirror the sections of the printed bill rather than the fields
+        above, because that is what a breakdown gets compared against. Each
+        rider lands in the section Dominion recovers it under, so
+        ``distribution_charge`` is the distribution kWh charge *plus* Riders
+        C1A/C4A/DIST/RBB, ``transmission_charge`` includes Rider T1, and the
+        fuel factor (Rider A) gets the separate line it has on the bill.
+
+        There is deliberately no combined "riders" line. Summing all seventeen
+        into one bucket puts 54% of a summer bill under a heading that does not
+        appear on the bill at all, which is indistinguishable at a glance from
+        double-counting something -- and it made ``largest_component()`` answer
+        "rider_charges" for every household in every month.
+
+        ``generation_charge`` is the generation *charge*; the name is spelled
+        out because ``generation`` would otherwise read as solar export next to
+        this integration's generation sensors.
 
         Rounding is deliberate and happens once, at the edge. The components
         are summed from tiered rates and will not add up to a round total, so
@@ -530,11 +598,17 @@ class PeriodBill:
         """
         return {
             "customer_charge": round(self.customer_charge, 2),
-            "distribution_charge": round(self.distribution, 2),
-            "generation_charge": round(self.generation, 2),
-            "transmission_charge": round(self.transmission, 2),
-            "rider_charges": round(self.riders, 2),
-            "consumption_tax": round(self.consumption_tax, 2),
+            "distribution_charge": round(
+                self.distribution + self.distribution_riders, 2
+            ),
+            "generation_charge": round(self.generation + self.supply_riders, 2),
+            "transmission_charge": round(
+                self.transmission + self.transmission_riders, 2
+            ),
+            "fuel_charge": round(self.fuel, 2),
+            "taxes_and_fees": round(
+                self.taxes_and_fees_riders + self.consumption_tax, 2
+            ),
         }
 
     def largest_component(self) -> str:
@@ -600,6 +674,9 @@ def calculate_schedule1_period_bill(
     generation = calculate_tiered_cost(kwh, 0.0, gen_rate)
     transmission = kwh * schedule.transmission_rate
     riders = kwh * schedule.total_rider_rate
+    by_category = {
+        category: kwh * schedule.rider_rate(category) for category in RiderCategory
+    }
     consumption_tax = calculate_consumption_tax(
         kwh, 0.0, schedule.consumption_tax_tiers
     )
@@ -620,6 +697,11 @@ def calculate_schedule1_period_bill(
         generation=generation,
         transmission=transmission,
         riders=riders,
+        distribution_riders=by_category[RiderCategory.DISTRIBUTION],
+        supply_riders=by_category[RiderCategory.SUPPLY],
+        transmission_riders=by_category[RiderCategory.TRANSMISSION],
+        fuel=by_category[RiderCategory.FUEL],
+        taxes_and_fees_riders=by_category[RiderCategory.TAXES_AND_FEES],
         consumption_tax=consumption_tax,
         total_kwh=kwh,
         season=season,
@@ -666,6 +748,7 @@ __all__ = [
     "FlatRider",
     "PeriodBill",
     "RateSchedule",
+    "RiderCategory",
     "Season",
     "SeasonalTieredRates",
     "TieredRate",

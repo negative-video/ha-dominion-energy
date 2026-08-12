@@ -113,6 +113,7 @@ from .usage import (
     UsageInterval,
     aggregate_hourly,
     billing_period_days,
+    billing_period_end,
     billing_period_start,
     build_cumulative_statistics,
     day_looks_complete,
@@ -1129,13 +1130,22 @@ class DominionEnergyCoordinator(DataUpdateCoordinator[DominionEnergyData]):
         The caller is responsible for saying which of the two totals a
         dashboard is looking at — see the `breakdown_basis` attribute in
         `sensor.py`.
+
+        The period end is run through `billing_period_end()` first. Only the
+        midpoint of the period is used from these two dates -- to pick the
+        season and the effective rate schedule -- and a period reported as
+        ending today rather than on the next read date drags that midpoint
+        backwards by half the remaining cycle.
         """
         if projected_usage is None or bill_forecast is None:
             return None
         return calculate_schedule1_period_bill(
             projected_usage,
             bill_forecast.current_period_start,
-            bill_forecast.current_period_end,
+            billing_period_end(
+                bill_forecast.current_period_start,
+                bill_forecast.current_period_end,
+            ),
         )
 
     def _project_period_cost(

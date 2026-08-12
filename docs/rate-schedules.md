@@ -126,11 +126,26 @@ Notes and caveats:
   pay the greater of the T1 energy charge or the T1 demand charge. Schedule 1
   itself likewise adds distribution and transmission standby charges for those
   customers. A flat per-kWh model under-bills that subset.
-- Riders split into two columns in the tariff: DIST, C1A and C4A are "cents per
-  **Distribution** kWh charge"; A, GEN, CE, CERC, E, SNA, OSW, SMR and T1 are
-  "cents per **Electricity Supply** kWh charge". The integration sums them, so
-  the distinction does not matter today — but it is the line to split on if
-  supply/delivery subtotals are ever added.
+- **Every rider is flat.** The worksheet's rider block (columns J–M) carries one
+  rate per rider, and the calculator multiplies each by `$F$15`, the period's
+  total kWh. Only the base distribution and generation charges carry the
+  first-800/over-800 split. If a breakdown ever suggests the riders are being
+  double-counted across tiers, check this before changing anything: on the
+  current schedule they legitimately total **10.0¢/kWh**, of which the fuel
+  factor alone is 3.76¢ and Rider T1 is 1.18¢.
+- Riders are grouped two different ways, and they do not agree:
+  - **By rate basis**, in the tariff: DIST, C1A and C4A are "cents per
+    **Distribution** kWh charge"; A, GEN, CE, CERC, E, SNA, OSW, SMR and T1 are
+    "cents per **Electricity Supply** kWh charge". Not modelled — it only
+    matters for a supply/delivery subtotal, which nothing needs yet.
+  - **By bill section**, in the "Rate Worksheet" tab, which is the layout a
+    customer actually sees: section A takes C1A/C2A/C4A/DIST/RBB, section B.2
+    takes E/GEN/SMR/SNA/CCR/CE/OSW/RPS (and CERC), section B.3 takes T1
+    alongside the transmission charge, section B.4 is Rider A on its own, and
+    section C takes DFCC, PIPP and Sales&Use. **This** is what
+    `RiderCategory` encodes and what `PeriodBill.components()` reports, so a
+    breakdown can be read line-by-line against a paper bill. A new rider needs
+    its section picked from that tab.
 - Securitization interest (reported in the press as roughly +$1.80/month for a
   1,000 kWh customer, expected as early as October 2026) is **not** encoded.
   It had not appeared in [3] or [4] as of 2026-08-11. When it lands it will
@@ -155,7 +170,9 @@ When the SCC approves a change:
    ```
 
    `changed` raises `KeyError` for a name that does not already exist, so a
-   typo fails loudly. Use `added={...}` for genuinely new riders.
+   typo fails loudly, and a re-rated rider keeps the bill section it already
+   had. Use `added={"NEW": (0.0031, RiderCategory.SUPPLY)}` for genuinely new
+   riders — pick the section from the "Rate Worksheet" tab, per the note above.
 5. Append a `_schedule("2027-07-01", _RIDERS_2027_07_01, <source url>)` entry to
    `VA_SCHEDULE_1_HISTORY`. **Keep the tuple sorted by effective date** — a
    module-level assertion enforces this.

@@ -17,11 +17,17 @@ _pkg_dir = str(
 if _pkg_dir not in sys.path:
     sys.path.insert(0, _pkg_dir)
 
-from rates import VA_SCHEDULE_1, calculate_schedule1_interval_cost  # noqa: E402
+from rates import (  # noqa: E402
+    VA_SCHEDULE_1,
+    Season,
+    calculate_schedule1_interval_cost,
+    calculate_schedule1_period_bill,
+)
 from usage import (  # noqa: E402
     DEFAULT_BILLING_PERIOD_DAYS,
     aggregate_hourly,
     billing_period_days,
+    billing_period_end,
     billing_period_start,
     build_cumulative_statistics,
     day_looks_complete,
@@ -104,6 +110,46 @@ class TestBillingPeriodDays:
         assert billing_period_days(date(2026, 1, 1), date(2026, 12, 31)) == (
             DEFAULT_BILLING_PERIOD_DAYS
         )
+
+
+class TestBillingPeriodEnd:
+    """Tests for repairing a period end that cannot be trusted."""
+
+    def test_plausible_end_is_returned_unchanged(self):
+        assert billing_period_end(date(2026, 7, 18), date(2026, 8, 17)) == (
+            date(2026, 8, 17)
+        )
+
+    def test_period_truncated_at_today_is_extended(self):
+        # The forecast reported the period as ending on the day it was read,
+        # making a monthly cycle look 19 days long.
+        assert billing_period_end(date(2026, 7, 23), date(2026, 8, 11)) == (
+            date(2026, 8, 22)
+        )
+
+    def test_missing_end_falls_back_to_a_full_cycle(self):
+        assert billing_period_end(date(2026, 7, 18), None) == date(2026, 8, 17)
+
+    def test_missing_start_is_left_alone(self):
+        assert billing_period_end(None, date(2026, 8, 17)) == date(2026, 8, 17)
+        assert billing_period_end(None, None) is None
+
+    def test_repaired_period_lands_in_the_right_season(self):
+        """The regression this exists for.
+
+        A cycle running 09-20 to 10-19 has an October midpoint, so the tariff
+        prices it at winter generation rates. Truncated at a late-September
+        "today" the midpoint falls in September and the whole bill is priced as
+        summer -- 4.62 c/kWh on generation over 800 kWh instead of 2.70.
+        """
+        start, truncated = date(2026, 9, 20), date(2026, 9, 25)
+        summer = calculate_schedule1_period_bill(2000.0, start, truncated)
+        repaired = calculate_schedule1_period_bill(
+            2000.0, start, billing_period_end(start, truncated)
+        )
+        assert summer.season is Season.SUMMER
+        assert repaired.season is Season.WINTER
+        assert summer.total - repaired.total > 20.0
 
 
 class TestBillingPeriodStart:

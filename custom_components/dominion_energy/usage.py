@@ -11,7 +11,7 @@ from __future__ import annotations
 from calendar import monthrange
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from typing import Protocol
 
 # Fallback billing period length when the bill forecast is unavailable.
@@ -81,6 +81,28 @@ def billing_period_days(
     if MIN_BILLING_PERIOD_DAYS <= days <= MAX_BILLING_PERIOD_DAYS:
         return days
     return default
+
+
+def billing_period_end(
+    period_start: date | None, period_end: date | None
+) -> date | None:
+    """Return a period end that can be trusted for date arithmetic.
+
+    The forecast's ``current_period_end`` is the *scheduled* next meter read,
+    but it is not always in the future: a period still in progress can come
+    back ending today, which makes the period look ~19 days long. Anything
+    `billing_period_days()` rejects as implausible is replaced here by the
+    start date plus a full default cycle.
+
+    This matters because the midpoint of the period picks the season and the
+    effective rate schedule. A period that really runs 09-20 to 10-19 has a
+    winter midpoint; truncated at today it has a summer one, and summer prices
+    generation above 800 kWh at 4.62 c/kWh against winter's 2.70 c/kWh -- a
+    ~$25 error on a 2,000 kWh bill, for a date bug.
+    """
+    if period_start is None:
+        return period_end
+    return period_start + timedelta(days=billing_period_days(period_start, period_end))
 
 
 def billing_period_start(target: date, anchor: date | None) -> date:
