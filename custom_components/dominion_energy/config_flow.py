@@ -103,12 +103,28 @@ class DominionEnergyConfigFlow(ConfigFlow, domain=DOMAIN):
         self._tfa_targets: list[TFATarget] = []
         self._selected_tfa_target: TFATarget | None = None
         self._account_meter_options: dict[str, tuple[AccountInfo, MeterDevice]] = {}
+        # Set when a step bounces the user back to an earlier one and needs the
+        # reason to survive the hop. `async_show_form` only renders the errors
+        # of the step that calls it, so an error set just before delegating to
+        # another step is otherwise thrown away silently.
+        self._carried_error: str | None = None
 
     @staticmethod
     @callback
     def async_get_options_flow(config_entry: ConfigEntry) -> OptionsFlow:
         """Get the options flow for this handler."""
         return DominionEnergyOptionsFlow(config_entry)
+
+    def _take_carried_error(self) -> dict[str, str]:
+        """Return and clear an error handed over from a previous step.
+
+        Consumed rather than read, so the message shows once and does not
+        follow the user around the rest of the flow.
+        """
+        if self._carried_error is None:
+            return {}
+        carried, self._carried_error = self._carried_error, None
+        return {"base": carried}
 
     async def async_step_user(
         self, user_input: dict[str, Any] | None = None
@@ -178,7 +194,7 @@ class DominionEnergyConfigFlow(ConfigFlow, domain=DOMAIN):
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
         """Handle TFA target selection step."""
-        errors: dict[str, str] = {}
+        errors: dict[str, str] = self._take_carried_error()
 
         if self._authenticator is None:
             return self.async_abort(reason="unknown")
@@ -267,8 +283,12 @@ class DominionEnergyConfigFlow(ConfigFlow, domain=DOMAIN):
             except TFAVerificationError:
                 errors["base"] = "tfa_failed"
             except TFAExpiredError:
-                # TFA session expired - restart TFA flow
-                errors["base"] = "tfa_expired"
+                # Gigya's assertion dies after about five minutes, so a code
+                # typed a little late fails here rather than being rejected.
+                # Restart the flow, but carry the reason: bouncing the user
+                # back to "where shall we send it?" with no message is
+                # indistinguishable from the code simply not registering.
+                self._carried_error = "tfa_expired"
                 self._tfa_targets = []  # Clear to force re-fetch
                 return await self.async_step_tfa_select()
             except GigyaError as err:
@@ -547,7 +567,7 @@ class DominionEnergyConfigFlow(ConfigFlow, domain=DOMAIN):
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
         """Handle TFA target selection during reauth."""
-        errors: dict[str, str] = {}
+        errors: dict[str, str] = self._take_carried_error()
 
         if self._authenticator is None:
             return self.async_abort(reason="unknown")
@@ -625,7 +645,8 @@ class DominionEnergyConfigFlow(ConfigFlow, domain=DOMAIN):
             except TFAVerificationError:
                 errors["base"] = "tfa_failed"
             except TFAExpiredError:
-                errors["base"] = "tfa_expired"
+                # Same five-minute Gigya assertion as the setup flow.
+                self._carried_error = "tfa_expired"
                 self._tfa_targets = []
                 return await self.async_step_reauth_tfa_select()
             except GigyaError as err:

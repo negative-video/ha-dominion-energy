@@ -111,7 +111,19 @@ def _abort_reasons(class_name: str) -> set[str]:
 
 
 def _error_keys(class_name: str) -> set[str]:
-    """Collect every ``errors["base"] = "..."`` value set by a flow class."""
+    """Collect every error key a flow class can put in front of the user.
+
+    Two forms count, and both end up in ``errors["base"]``:
+
+    * ``errors["base"] = "..."`` — shown by the step that sets it.
+    * ``self._carried_error = "..."`` — set by a step that then delegates to an
+      earlier one, which picks it up via ``_take_carried_error()``. A step's
+      own ``errors`` dict does not survive delegation, so this is how a reason
+      crosses the hop.
+
+    Missing the second form would leave its strings unguarded: the key would
+    still reach the UI, but nothing would notice if the translation went away.
+    """
     class_node = _class_node(class_name)
     keys: set[str] = set()
     for node in ast.walk(class_node):
@@ -126,6 +138,13 @@ def _error_keys(class_name: str) -> set[str]:
                 and target.value.id == "errors"
                 and isinstance(target.slice, ast.Constant)
                 and target.slice.value == "base"
+            ):
+                keys.add(node.value.value)
+            elif (
+                isinstance(target, ast.Attribute)
+                and target.attr == "_carried_error"
+                and isinstance(target.value, ast.Name)
+                and target.value.id == "self"
             ):
                 keys.add(node.value.value)
     return keys

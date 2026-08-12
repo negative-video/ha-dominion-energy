@@ -905,18 +905,31 @@ class DominionEnergyCoordinator(DataUpdateCoordinator[DominionEnergyData]):
             )
 
         except TokenExpiredError as err:
-            _LOGGER.info("Refresh token expired, attempting auto-reauth")
-            if allow_reauth and await self._async_attempt_reauth():
-                # Retry the update once with new tokens, never deeper
-                return await self._async_fetch_data(allow_reauth=False)
-            raise ConfigEntryAuthFailed(
-                "Authentication failed - please re-authenticate"
-            ) from err
+            return await self._async_handle_token_expiry(err, allow_reauth=allow_reauth)
         except InvalidAuthError as err:
             raise ConfigEntryAuthFailed(
                 "Authentication failed - please re-authenticate"
             ) from err
         except CannotConnectError as err:
+            # dompower's `_async_request` re-raises only
+            # `(InvalidAuthError, ApiError, RateLimitError)`. `TokenExpiredError`
+            # is a *sibling* of `InvalidAuthError` under `AuthenticationError`,
+            # not a subclass, so an expired refresh token falls through to its
+            # bare `except Exception` and comes back as `CannotConnectError`.
+            #
+            # Left unhandled that is not a cosmetic mislabel: the expiry never
+            # reaches the branch above, so auto-reauth never runs and
+            # `ConfigEntryAuthFailed` is never raised. Home Assistant shows no
+            # "Reauthenticate" button and the entry just retries forever, which
+            # is what made every expiry look like the integration had broken.
+            #
+            # The wrap uses `raise ... from err`, so the original is on
+            # `__cause__` and can be recovered exactly, without matching on the
+            # message text.
+            if isinstance(err.__cause__, TokenExpiredError):
+                return await self._async_handle_token_expiry(
+                    err.__cause__, allow_reauth=allow_reauth
+                )
             raise UpdateFailed(f"Cannot connect to Dominion Energy API: {err}") from err
         except ApiError as err:
             if err.status_code in (401, 403):
@@ -987,6 +1000,25 @@ class DominionEnergyCoordinator(DataUpdateCoordinator[DominionEnergyData]):
             round(projected_usage, 3),
             self._project_period_cost(projected_usage, usage, cost, bill_forecast),
         )
+
+    async def _async_handle_token_expiry(
+        self, err: TokenExpiredError, *, allow_reauth: bool
+    ) -> DominionEnergyData:
+        """Try to recover from an expired refresh token, then hand off.
+
+        Never returns normally: either the retry produces data or
+        `ConfigEntryAuthFailed` starts the reauth flow. Raising that is what
+        puts the "Reauthenticate" button in front of the user, which is far
+        less work for them than the full credentials-and-two-factor round trip
+        that Reconfigure demands.
+        """
+        _LOGGER.info("Refresh token expired, attempting auto-reauth")
+        if allow_reauth and await self._async_attempt_reauth():
+            # Retry the update once with new tokens, never deeper
+            return await self._async_fetch_data(allow_reauth=False)
+        raise ConfigEntryAuthFailed(
+            "Authentication failed - please re-authenticate"
+        ) from err
 
     async def _async_hvac_windows(
         self, first_day: date, last_day: date
