@@ -27,3 +27,10 @@ dist/
 GreenButton*.xml
 greenbutton*.xml
 *_GreenButton*.xml
+
+# Billing history exports. The account number is in the filename and every
+# amount billed is in the rows. Both spellings: Dominion's own export is
+# "BilllingHistory" (three l's).
+Bill*History*.xls*
+bill*history*.xls*
+*_BillingHistory*.csv

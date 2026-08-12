@@ -848,7 +848,7 @@ class DominionEnergyCoordinator(DataUpdateCoordinator[DominionEnergyData]):
                 billing_period_end(
                     bill_forecast.current_period_start,
                     bill_forecast.current_period_end,
-                    self._default_period_days(bill_forecast),
+                    DEFAULT_BILLING_PERIOD_DAYS,
                     dt_util.now().date(),
                 )
                 if bill_forecast
@@ -960,26 +960,21 @@ class DominionEnergyCoordinator(DataUpdateCoordinator[DominionEnergyData]):
                 ) from err
             raise UpdateFailed(f"API error: {err}") from err
 
+    # Why the fallback is a nominal month and not the last bill's own length:
+    # the last bill is a real meter-read-to-meter-read cycle, so borrowing its
+    # length looks like the better guess. Measured against 21 consecutive
+    # cycles from one account's billing history it is materially worse --
+    # 2.25 days mean absolute error against 1.40 for a flat 30, and off by two
+    # days or more on 12 cycles out of 20 rather than 8.
+    #
+    # Cycle length is mean-reverting, not persistent (lag-1 autocorrelation
+    # -0.43). Meters are read on a monthly schedule, so a cycle that runs long
+    # is followed by a short one that pulls the read date back: 33 days in
+    # January 2026 was followed by 28 in February. Carrying the previous
+    # length forward propagates that swing in exactly the wrong direction.
     @staticmethod
-    def _default_period_days(bill_forecast: BillForecast | None) -> int:
-        """Return the cycle length to assume when the reported end is no good.
-
-        The last bill is a *completed* period, so its two dates are real meter
-        reads and its length is this meter's actual cycle -- a far better guess
-        than a nominal 30 days, which read cycles routinely miss by several.
-        Falls back to the nominal length when the last bill is missing or its
-        own dates are implausible.
-        """
-        if bill_forecast is None:
-            return DEFAULT_BILLING_PERIOD_DAYS
-        return billing_period_days(
-            bill_forecast.last_bill.period_start,
-            bill_forecast.last_bill.period_end,
-        )
-
-    @classmethod
     def _billing_period_days(
-        cls, bill_forecast: BillForecast | None, today: date | None = None
+        bill_forecast: BillForecast | None, today: date | None = None
     ) -> int:
         """Return the length of the current billing period in days."""
         if bill_forecast is None:
@@ -987,7 +982,7 @@ class DominionEnergyCoordinator(DataUpdateCoordinator[DominionEnergyData]):
         return billing_period_days(
             bill_forecast.current_period_start,
             bill_forecast.current_period_end,
-            cls._default_period_days(bill_forecast),
+            DEFAULT_BILLING_PERIOD_DAYS,
             today,
         )
 
@@ -1160,9 +1155,8 @@ class DominionEnergyCoordinator(DataUpdateCoordinator[DominionEnergyData]):
 
         return merge_windows(windows)
 
-    @classmethod
+    @staticmethod
     def _projected_bill(
-        cls,
         projected_usage: float | None,
         bill_forecast: BillForecast | None,
         today: date | None = None,
@@ -1199,7 +1193,7 @@ class DominionEnergyCoordinator(DataUpdateCoordinator[DominionEnergyData]):
             billing_period_end(
                 bill_forecast.current_period_start,
                 bill_forecast.current_period_end,
-                cls._default_period_days(bill_forecast),
+                DEFAULT_BILLING_PERIOD_DAYS,
                 today,
             ),
         )

@@ -223,21 +223,11 @@ class ConsumptionOnlyInterval:
 
 
 @dataclass(frozen=True)
-class _LastBill:
-    """The completed period `_default_period_days` measures the cycle from."""
-
-    period_start: date | None = date(2026, 6, 5)
-    period_end: date | None = date(2026, 7, 5)
-
-
-@dataclass(frozen=True)
 class _Forecast:
-    """The fields `_projected_bill` reads off a ``BillForecast``."""
+    """The two fields `_projected_bill` reads off a ``BillForecast``."""
 
     current_period_start: date
     current_period_end: date
-    # Frozen, so one shared instance is a safe default.
-    last_bill: _LastBill = _LastBill()
 
 
 def make_day(
@@ -482,14 +472,10 @@ class TestProjectedBillBreakdown:
 
     # A cycle whose end tracks today, at the point the truncated length first
     # looks plausible: 20 days clears MIN_BILLING_PERIOD_DAYS, so only the
-    # "must be in the future" check can catch it. The last bill supplies the
-    # real 28-day cycle, which carries the midpoint from September into
-    # October -- i.e. from summer generation rates to winter ones.
-    TRUNCATED = _Forecast(
-        date(2026, 9, 20),
-        date(2026, 10, 10),
-        _LastBill(date(2026, 8, 23), date(2026, 9, 20)),
-    )
+    # "must be in the future" check can catch it. Repairing it to a nominal
+    # month carries the midpoint from September into October -- i.e. from
+    # summer generation rates to winter ones.
+    TRUNCATED = _Forecast(date(2026, 9, 20), date(2026, 10, 10))
 
     def test_an_end_tracking_today_is_repaired_before_pricing(self) -> None:
         """The 2026-08-12 regression, in the month where it changes the price."""
