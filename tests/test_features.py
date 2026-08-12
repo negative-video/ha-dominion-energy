@@ -64,6 +64,13 @@ def _placeholder_modules() -> dict[str, types.ModuleType]:
         NONE = "none"
         KILO_WATT_HOUR = "kWh"
 
+    class _State:
+        """Stand-in for ``homeassistant.core.State``.
+
+        Only needs to be a class: the coordinator uses it as an ``isinstance``
+        target when narrowing recorder history, and nothing here is called.
+        """
+
     def _unused(*_args: Any, **_kwargs: Any) -> Any:
         raise AssertionError("placeholder Home Assistant API called in a unit test")
 
@@ -102,7 +109,7 @@ def _placeholder_modules() -> dict[str, types.ModuleType]:
         },
         "homeassistant.config_entries": {"ConfigEntry": _Coordinator},
         "homeassistant.const": {"UnitOfEnergy": _Sentinel},
-        "homeassistant.core": {"HomeAssistant": object},
+        "homeassistant.core": {"HomeAssistant": object, "State": _State},
         "homeassistant.exceptions": {
             "ConfigEntryAuthFailed": type("ConfigEntryAuthFailed", (Exception,), {}),
             "HomeAssistantError": type("HomeAssistantError", (Exception,), {}),

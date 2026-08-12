@@ -36,7 +36,7 @@ from homeassistant.components.recorder.statistics import (
 )
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import UnitOfEnergy
-from homeassistant.core import HomeAssistant
+from homeassistant.core import HomeAssistant, State
 from homeassistant.exceptions import ConfigEntryAuthFailed, HomeAssistantError
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.update_coordinator import (
@@ -1043,10 +1043,22 @@ class DominionEnergyCoordinator(DataUpdateCoordinator[DominionEnergyData]):
 
         windows: list[TimeWindow] = []
         for entity_id in entity_ids:
-            states = history.get(entity_id) or []
+            # `get_significant_states` is typed as returning `State | dict`:
+            # it hands back bare dicts under `minimal_response` or
+            # `compressed_state_format`, and a compressed row carries no
+            # attributes, so `hvac_action` would be invisible. Neither is
+            # requested above, so narrowing here should never drop anything --
+            # but it is the one place a future default change would otherwise
+            # turn the filter silently inert again, which is exactly the
+            # failure 1.5.0 shipped.
+            states = [
+                state
+                for state in history.get(entity_id) or []
+                if isinstance(state, State)
+            ]
             if not states:
                 _LOGGER.debug(
-                    "No recorded history for %s; its runtime cannot be "
+                    "No usable recorded history for %s; its runtime cannot be "
                     "excluded from the baseline",
                     entity_id,
                 )
