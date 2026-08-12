@@ -64,45 +64,87 @@ def shift_months(anchor: date, months: int) -> date:
     return date(year, month, min(anchor.day, monthrange(year, month)[1]))
 
 
+def period_end_is_trustworthy(
+    period_start: date | None,
+    period_end: date | None,
+    today: date | None = None,
+) -> bool:
+    """Whether a reported period end can be used as the next meter-read date.
+
+    Two independent ways the forecast's ``current_period_end`` lies about a
+    period that is still running, both of which have been observed live:
+
+    1. The API returns the date usage is published *through* rather than the
+       scheduled read, so the end tracks today and advances by a day every day.
+    2. The field is absent and `dompower` substitutes ``date.today()``
+       (``client._parse_bill_forecast``), which is indistinguishable from (1)
+       by the time it reaches us.
+
+    Both collapse to the same structural tell: **the end of a period that has
+    not finished yet must be in the future.** Checking that is what the length
+    bounds alone cannot do -- a truncated end stays inside 20-45 days for most
+    of the cycle, so the bounds wave it through from day 20 onward.
+
+    ``today`` is optional so the pure length check remains available to callers
+    that have no clock; without it only the bounds are applied.
+    """
+    if period_start is None or period_end is None:
+        return False
+    if today is not None and period_end <= today:
+        return False
+    return (
+        MIN_BILLING_PERIOD_DAYS
+        <= (period_end - period_start).days
+        <= (MAX_BILLING_PERIOD_DAYS)
+    )
+
+
 def billing_period_days(
     period_start: date | None,
     period_end: date | None,
     default: int = DEFAULT_BILLING_PERIOD_DAYS,
+    today: date | None = None,
 ) -> int:
     """Return the number of days covered by a billing period.
 
     Dominion reports the period as meter-read to meter-read dates, so the number
-    of billed days is ``end - start``. A missing or implausible period falls back
-    to ``default``.
+    of billed days is ``end - start``. A missing, implausible or not-yet-elapsed
+    period falls back to ``default`` -- see `period_end_is_trustworthy()` for
+    why the last of those matters and why the caller should pass ``today``.
     """
-    if period_start is None or period_end is None:
+    if not period_end_is_trustworthy(period_start, period_end, today):
         return default
-    days = (period_end - period_start).days
-    if MIN_BILLING_PERIOD_DAYS <= days <= MAX_BILLING_PERIOD_DAYS:
-        return days
-    return default
+    return (period_end - period_start).days  # type: ignore[operator]
 
 
 def billing_period_end(
-    period_start: date | None, period_end: date | None
+    period_start: date | None,
+    period_end: date | None,
+    default: int = DEFAULT_BILLING_PERIOD_DAYS,
+    today: date | None = None,
 ) -> date | None:
     """Return a period end that can be trusted for date arithmetic.
 
-    The forecast's ``current_period_end`` is the *scheduled* next meter read,
-    but it is not always in the future: a period still in progress can come
-    back ending today, which makes the period look ~19 days long. Anything
-    `billing_period_days()` rejects as implausible is replaced here by the
-    start date plus a full default cycle.
+    An untrustworthy end is replaced by the start plus ``default`` days, so the
+    period keeps a full cycle's length instead of stopping at today.
 
-    This matters because the midpoint of the period picks the season and the
-    effective rate schedule. A period that really runs 09-20 to 10-19 has a
-    winter midpoint; truncated at today it has a summer one, and summer prices
-    generation above 800 kWh at 4.62 c/kWh against winter's 2.70 c/kWh -- a
-    ~$25 error on a 2,000 kWh bill, for a date bug.
+    Two things read this. The projection divides period-to-date usage by the
+    days observed and multiplies by the period length; when the end tracks
+    today those two terms are the same number and the projection silently
+    degenerates to "however much you have used so far", losing a third of the
+    forecast overnight the day the length first looks plausible.
+
+    The other is the midpoint, which picks the season and the effective rate
+    schedule. A period that really runs 09-20 to 10-19 has a winter midpoint;
+    truncated at today it has a summer one, and summer prices generation above
+    800 kWh at 4.62 c/kWh against winter's 2.70 c/kWh -- a ~$25 error on a
+    2,000 kWh bill, for a date bug.
     """
     if period_start is None:
         return period_end
-    return period_start + timedelta(days=billing_period_days(period_start, period_end))
+    return period_start + timedelta(
+        days=billing_period_days(period_start, period_end, default, today)
+    )
 
 
 def billing_period_start(target: date, anchor: date | None) -> date:
