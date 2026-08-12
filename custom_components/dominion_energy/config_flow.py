@@ -280,7 +280,19 @@ class DominionEnergyConfigFlow(ConfigFlow, domain=DOMAIN):
                 # Proceed to account discovery
                 return await self.async_step_discover_accounts()
 
-            except TFAVerificationError:
+            except TFAVerificationError as err:
+                # Log what Gigya actually said. Without this a rejected code
+                # leaves no trace anywhere, and "Verification code is
+                # incorrect" is the only thing the user or a bug report has to
+                # go on -- which is wrong whenever the rejection was not about
+                # the code at all.
+                _LOGGER.error(
+                    "Gigya rejected the verification code "
+                    "(errorCode=%s, callId=%s): %s",
+                    err.error_code,
+                    err.call_id,
+                    err,
+                )
                 errors["base"] = "tfa_failed"
             except TFAExpiredError:
                 # Gigya's assertion dies after about five minutes, so a code
@@ -642,7 +654,14 @@ class DominionEnergyConfigFlow(ConfigFlow, domain=DOMAIN):
                 }
                 return self.async_update_reload_and_abort(reauth_entry, data=new_data)
 
-            except TFAVerificationError:
+            except TFAVerificationError as err:
+                _LOGGER.error(
+                    "Gigya rejected the verification code "
+                    "(errorCode=%s, callId=%s): %s",
+                    err.error_code,
+                    err.call_id,
+                    err,
+                )
                 errors["base"] = "tfa_failed"
             except TFAExpiredError:
                 # Same five-minute Gigya assertion as the setup flow.
