@@ -132,20 +132,20 @@ def _error_keys(class_name: str) -> set[str]:
         if not isinstance(node.value.value, str):
             continue
         for target in node.targets:
-            if (
+            shown_directly = (
                 isinstance(target, ast.Subscript)
                 and isinstance(target.value, ast.Name)
                 and target.value.id == "errors"
                 and isinstance(target.slice, ast.Constant)
                 and target.slice.value == "base"
-            ):
-                keys.add(node.value.value)
-            elif (
+            )
+            carried_over = (
                 isinstance(target, ast.Attribute)
                 and target.attr == "_carried_error"
                 and isinstance(target.value, ast.Name)
                 and target.value.id == "self"
-            ):
+            )
+            if shown_directly or carried_over:
                 keys.add(node.value.value)
     return keys
 
