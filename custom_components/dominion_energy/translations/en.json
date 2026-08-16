@@ -237,6 +237,9 @@
       "rate_schedule_effective_date": {
         "name": "Rate schedule effective date"
       },
+      "last_successful_update": {
+        "name": "Last successful update"
+      },
       "latest_interval_generation": {
         "name": "Latest interval generation"
       },

@@ -178,6 +178,10 @@ filter_incomplete_days_allowing_generation = (
 generation_of = coordinator.generation_of
 project_period_usage = coordinator.project_period_usage
 rate_check = coordinator.rate_check
+describe_api_error = coordinator.describe_api_error
+stale_data_is_serviceable = coordinator.stale_data_is_serviceable
+STALE_DATA_GRACE = coordinator.STALE_DATA_GRACE
+MAX_ERROR_BODY_CHARS = coordinator.MAX_ERROR_BODY_CHARS
 resolve_statistic_id_prefix = coordinator.resolve_statistic_id_prefix
 DominionEnergyData = coordinator.DominionEnergyData
 # Bound staticmethods are callable straight off the class, so the breakdown
@@ -813,8 +817,138 @@ class TestDominionEnergyDataContract:
             "rate_check_estimated",
             "rate_check_actual",
             "rate_check_discrepancy",
+            "last_success",
         ):
             assert getattr(data, field) is None, field
+
+
+class _FakeApiError(Exception):
+    """Stand-in for ``dompower.ApiError``, which carries the response body."""
+
+    def __init__(
+        self, message: str, status_code: int | None = None, response_text: str = ""
+    ) -> None:
+        super().__init__(message)
+        self.status_code = status_code
+        self.response_text = response_text
+
+
+class TestDescribeApiError:
+    """`str(ApiError)` is "API error: 400" and says nothing about the cause.
+
+    A real incident: every hourly cycle logged `API error: API error: 400`
+    against both the bill forecast and the interval export for hours on end.
+    The status alone cannot tell an inverted date window from a token that
+    does not cover the account from a WAF block page, and the body -- which
+    the client had all along -- was thrown away before it reached the log.
+    """
+
+    def test_a_bodyless_error_is_left_alone(self) -> None:
+        assert describe_api_error(_FakeApiError("API error: 400")) == "API error: 400"
+
+    def test_a_plain_exception_is_left_alone(self) -> None:
+        assert describe_api_error(ValueError("boom")) == "boom"
+
+    def test_the_body_is_appended(self) -> None:
+        err = _FakeApiError("API error: 400", 400, '{"message":"Invalid date range"}')
+        assert describe_api_error(err) == (
+            'API error: 400: {"message":"Invalid date range"}'
+        )
+
+    def test_the_body_is_squashed_onto_one_line(self) -> None:
+        """A multi-line HTML block page must not take over the log."""
+        err = _FakeApiError("API error: 400", 400, "<html>\n  <body>\n Denied\n")
+        assert describe_api_error(err) == "API error: 400: <html> <body> Denied"
+
+    def test_identifiers_are_masked(self) -> None:
+        """Fault documents echo the request back, and logs get pasted publicly."""
+        err = _FakeApiError(
+            "API error: 400", 400, "accountNumber 210014878974 is not entitled"
+        )
+        detail = describe_api_error(err, secrets=("210014878974", "0000000002602805"))
+        assert "210014878974" not in detail
+        assert "*** is not entitled" in detail
+
+    def test_a_missing_identifier_masks_nothing(self) -> None:
+        """A None secret must not stringify and mask every "None" in the body."""
+        err = _FakeApiError("API error: 400", 400, "meterId None was rejected")
+        assert describe_api_error(err, secrets=(None,)) == (
+            "API error: 400: meterId None was rejected"
+        )
+
+    def test_short_secrets_are_not_masked(self) -> None:
+        """Masking a two-character value would redact half the body."""
+        err = _FakeApiError("API error: 400", 400, "the request was rejected")
+        assert "request" in describe_api_error(err, secrets=("re",))
+
+    def test_a_long_body_is_truncated(self) -> None:
+        err = _FakeApiError("API error: 500", 500, "x" * 5000)
+        detail = describe_api_error(err)
+        assert detail.endswith("... (truncated)")
+        assert len(detail) < MAX_ERROR_BODY_CHARS + 100
+
+
+class TestStaleDataIsServiceable:
+    """One refused poll is not a reason to blank a day-old-by-design source.
+
+    The API publishes exactly one new day per day, so the numbers on screen
+    stay just as true through an API outage as they were an hour earlier -- and
+    `data_date` says which day they belong to. Going unavailable on the first
+    failure only removed the Energy Dashboard's history along with them.
+    """
+
+    NOW = datetime(2026, 8, 16, 12, 0, tzinfo=NY)
+
+    def test_data_with_no_recorded_success_is_never_served(self) -> None:
+        """Nothing is known about its age, so "fresh" is the wrong guess."""
+        assert not stale_data_is_serviceable(None, self.NOW)
+
+    def test_a_fresh_payload_is_served(self) -> None:
+        assert stale_data_is_serviceable(self.NOW - timedelta(hours=3), self.NOW)
+
+    def test_a_payload_just_inside_the_window_is_served(self) -> None:
+        last = self.NOW - STALE_DATA_GRACE + timedelta(minutes=1)
+        assert stale_data_is_serviceable(last, self.NOW)
+
+    def test_a_payload_past_the_window_is_not(self) -> None:
+        last = self.NOW - STALE_DATA_GRACE - timedelta(minutes=1)
+        assert not stale_data_is_serviceable(last, self.NOW)
+
+    def test_the_boundary_itself_is_not_served(self) -> None:
+        assert not stale_data_is_serviceable(self.NOW - STALE_DATA_GRACE, self.NOW)
+
+    def test_the_window_spans_a_full_publication_cycle(self) -> None:
+        """Shorter than a day and a single bad night still empties the sensors."""
+        assert timedelta(hours=24) <= STALE_DATA_GRACE
+
+
+class TestAuthFailuresAreNotAbsorbed:
+    """The grace window must not swallow credentials that need attention.
+
+    `_async_update_data` catches `UpdateFailed` and only `UpdateFailed`:
+    `ConfigEntryAuthFailed` is what puts the "Reauthenticate" button in front
+    of the user, and day-old data hiding it would leave the integration quietly
+    frozen until someone noticed the numbers had stopped moving.
+    """
+
+    @staticmethod
+    def _update_data_source() -> str:
+        tree = ast.parse((COMPONENT_DIR / "coordinator.py").read_text())
+        node = next(
+            n
+            for n in ast.walk(tree)
+            if isinstance(n, ast.AsyncFunctionDef) and n.name == "_async_update_data"
+        )
+        return ast.unparse(node)
+
+    def test_only_update_failed_is_caught(self) -> None:
+        handlers = [
+            ast.unparse(handler.type) if handler.type else "bare"
+            for node in ast.walk(ast.parse(self._update_data_source()))
+            if isinstance(node, ast.Try)
+            for handler in node.handlers
+        ]
+        assert handlers == ["UpdateFailed"], handlers
 
 
 class TestInvertedStatisticsWindow:

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, datetime
 from typing import Any
 
 from homeassistant.components.sensor import (
@@ -42,7 +42,7 @@ _LATEST_SCHEDULE = get_schedule_for_date(_SCHEDULE_EFFECTIVE_FROM)
 class DominionEnergySensorDescription(SensorEntityDescription):  # type: ignore[override]
     """Describes a Dominion Energy sensor."""
 
-    value_fn: Callable[[DominionEnergyData], float | str | date | None]
+    value_fn: Callable[[DominionEnergyData], float | str | date | datetime | None]
 
 
 SENSORS: tuple[DominionEnergySensorDescription, ...] = (
@@ -272,6 +272,19 @@ SENSORS: tuple[DominionEnergySensorDescription, ...] = (
         # rate table is built from, which is the context needed to judge the
         # drift sensor above.
         value_fn=lambda _data: _SCHEDULE_EFFECTIVE_FROM,
+    ),
+    DominionEnergySensorDescription(
+        key="last_successful_update",
+        translation_key="last_successful_update",
+        device_class=SensorDeviceClass.TIMESTAMP,
+        entity_category=EntityCategory.DIAGNOSTIC,
+        # The coordinator keeps serving the last good numbers through a
+        # transient API failure rather than taking every entity unavailable,
+        # which is the right trade for a source that publishes once a day --
+        # but it means "the sensors have values" no longer proves the API is
+        # answering. This is the entity that does, and the one to automate an
+        # alert on if it stops moving.
+        value_fn=lambda data: data.last_success,
     ),
 )
 

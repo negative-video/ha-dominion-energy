@@ -6,7 +6,7 @@ treat any leak of a sentinel credential as a hard failure.
 
 from __future__ import annotations
 
-from datetime import date, timedelta
+from datetime import UTC, date, datetime, timedelta
 import importlib.util
 import json
 import sys
@@ -83,6 +83,7 @@ def _build(
         "last_exception": getattr(coordinator, "last_exception", None),
         "update_interval": getattr(coordinator, "update_interval", None),
         "coordinator_data": getattr(coordinator, "data", None),
+        "consecutive_failures": getattr(coordinator, "consecutive_failures", None),
         "has_statistics": True,
         "ha_version": "2026.8.1",
     }
@@ -322,6 +323,28 @@ class TestDiagnosticUsefulness:
         assert result["coordinator"]["last_exception_type"] is None
         assert result["coordinator"]["update_interval_seconds"] == 1800.0
         assert result["coordinator"]["has_data"] is True
+
+    def test_a_degraded_coordinator_is_distinguishable_from_a_healthy_one(
+        self, fake_entry_data, fake_entry_options
+    ):
+        """`last_update_success` alone no longer means the API is answering.
+
+        A failed cycle falls back to the last good payload, which keeps
+        `last_update_success` True and every entity populated. The failure
+        count next to the age of that payload is what tells the two apart.
+        """
+        stale = FakeCoordinatorData(
+            data_date=date(2026, 8, 14),
+            last_success=datetime(2026, 8, 15, 3, 33, tzinfo=UTC),
+        )
+        result = _build(
+            fake_entry_data,
+            fake_entry_options,
+            FakeCoordinator(data=stale, consecutive_failures=11),
+        )
+        assert result["coordinator"]["last_update_success"] is True
+        assert result["coordinator"]["consecutive_failures"] == 11
+        assert result["coordinator"]["last_success"] == "2026-08-15T03:33:00+00:00"
 
     def test_config_entry_metadata_is_reported(
         self, fake_entry_data, fake_entry_options, fake_coordinator

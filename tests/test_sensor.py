@@ -46,6 +46,7 @@ ALLOWED_STATE_CLASSES: dict[str, set[str]] = {
     "SensorDeviceClass.MONETARY": {"SensorStateClass.TOTAL"},
     "SensorDeviceClass.POWER": {"SensorStateClass.MEASUREMENT"},
     "SensorDeviceClass.DATE": set(),
+    "SensorDeviceClass.TIMESTAMP": set(),
 }
 
 
@@ -262,6 +263,7 @@ class TestEntityCategories:
             "rate_check_estimated",
             "rate_check_drift",
             "rate_schedule_effective_date",
+            "last_successful_update",
         ],
     )
     def test_plumbing_is_diagnostic(self, key: str) -> None:

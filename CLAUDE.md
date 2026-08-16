@@ -80,11 +80,26 @@ Sharp edges already handled — do not regress them:
 - `_find_last_complete_day_stat()` walks backwards past stale zero-value statistics written by older versions, and `_get_sum_before()` recovers the correct running sum when a day is re-processed.
 - `_backfill_initiated` guards against a second backfill firing before the recorder has committed the first.
 
+### Surviving a Bad API Day
+
+The API is behind a WAF and has bad hours. A real one: from 00:33 to at least 02:31 every cycle re-authenticated successfully and then took HTTP 400 on *both* the bill forecast and the interval export; by 15:05 the same requests worked untouched. Nothing about the requests had changed.
+
+`_async_update_data()` therefore catches `UpdateFailed` and falls back to the last good payload for `STALE_DATA_GRACE` (24 hours) instead of letting a refused poll take every entity unavailable. Three things about that are load-bearing:
+
+1. **The grace window spans a full publication cycle.** The API publishes exactly one new day per day, so a payload under 24 hours old is as current as the source ever gets, and `data_date` says which day it belongs to. Anything shorter and one bad night still empties the sensors and stalls the Energy Dashboard.
+2. **Only `UpdateFailed` is absorbed** — `tests/test_features.py` asserts the handler list. `ConfigEntryAuthFailed` must pass straight through, or the "Reauthenticate" button never appears and the integration sits frozen on day-old numbers instead.
+3. **`last_successful_update` is the entity that tells the truth.** Since the other sensors keep reading through a failure, "the sensors have values" no longer proves the API is answering; this one stops advancing the moment cycles start failing. Diagnostics reports `consecutive_failures` alongside it.
+
+Before this, the first failure raised, which took the entity unavailable *and* — when it happened during setup — left the entry retrying. A user reload landing on an in-flight retry cancels it (`Setup of config entry ... cancelled`), and Home Assistant schedules no further retry after a cancellation: the observed result was twelve hours with the integration entirely gone.
+
+`describe_api_error()` carries the response body into the log, squashed onto one line, truncated, with the account and meter numbers masked. `str(ApiError)` is `"API error: 400"` and nothing more, which cannot distinguish an inverted date window from an unentitled account from a WAF block page — the incident above was undiagnosable for exactly that reason.
+
 ### Authentication and Reauth
 
 - `TokenExpiredError` triggers `_async_attempt_reauth()`; only if that fails (or TFA is required) does the coordinator raise `ConfigEntryAuthFailed` and hand off to the reauth flow.
 - `InvalidAuthError`, and `ApiError` with status 401/403, raise `ConfigEntryAuthFailed` directly.
 - Gigya cookies are stored so reauth can often skip TFA.
+- **A daily reauth is normal, not a fault.** `ACCESS_TOKEN_EXPIRY_MINUTES` is 30 in `dompower` and the per-day cache skips whole cycles, so the tokens usually go a full day untouched; the refresh token has expired by the time the next real fetch comes round, and `_async_attempt_reauth()` logs in again. One `Refresh token expired, attempting auto-reauth` per day followed by `Successfully re-authenticated` is the healthy pattern.
 
 ### External Dependencies
 
@@ -131,7 +146,7 @@ uv pip install -e ../dompower
 
 - `tests/test_rates.py` — Schedule 1 tariff math and the effective-dated schedule registry. The engine tests pin `get_schedule_for_date(date(2026, 1, 1))` on purpose: their expected values come from that worksheet, so they are regression tests of the calculation, not of current rates.
 - `tests/test_usage.py` — the pure helpers in `usage.py`, including the DST and billing-period regressions.
-- `tests/test_features.py` — projection maths, rate-drift comparison, generation aggregation, statistic-ID resolution.
+- `tests/test_features.py` — projection maths, rate-drift comparison, generation aggregation, statistic-ID resolution, and the transient-failure policy (`describe_api_error`, `stale_data_is_serviceable`, and that `_async_update_data` catches nothing but `UpdateFailed`).
 - `tests/test_sensor.py` — translation-key coverage in both directions, entity naming, device/state class legality, and the conditional-group gating.
 - `tests/test_binary_sensor.py` — the same contract for the binary sensor platform, plus that "off" and "unknown" stay distinguishable.
 - `tests/test_entity.py` — the unique-ID and device-identifier schemes, and that no platform reimplements either. Treat this the way `test_diagnostics.py` is treated: a regression here silently discards every user's recorded history.
