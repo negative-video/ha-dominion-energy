@@ -225,6 +225,7 @@ def build_diagnostics(
     last_exception: Any,
     update_interval: Any,
     coordinator_data: Any,
+    consecutive_failures: Any = None,
     has_statistics: Any = None,
     ha_version: Any = None,
     dompower_version: Any = None,
@@ -290,6 +291,13 @@ def build_diagnostics(
                 else None
             ),
             "has_data": data is not None,
+            # A failed cycle now falls back to the last good payload instead of
+            # taking the entities unavailable, so `last_update_success` alone
+            # no longer tells the whole story. These two do: a non-zero failure
+            # count next to an old `last_success` is an integration that looks
+            # healthy on the dashboard while the API has stopped answering.
+            "consecutive_failures": consecutive_failures,
+            "last_success": _as_iso(getattr(data, "last_success", None)),
         },
         "cost": {
             # The mode the coordinator will actually apply, with the default
@@ -369,6 +377,7 @@ async def async_get_config_entry_diagnostics(
         last_exception=getattr(coordinator, "last_exception", None),
         update_interval=getattr(coordinator, "update_interval", None),
         coordinator_data=getattr(coordinator, "data", None),
+        consecutive_failures=getattr(coordinator, "consecutive_failures", None),
         has_statistics=has_statistics,
         ha_version=getattr(hass.config, "version", None),
         dompower_version=dompower_version,

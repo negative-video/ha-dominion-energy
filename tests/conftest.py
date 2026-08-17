@@ -102,6 +102,7 @@ class FakeCoordinatorData:
     data_date: date | None = None
     month_start_date: date | None = None
     month_end_date: date | None = None
+    last_success: datetime | None = None
 
 
 @dataclass
@@ -112,6 +113,7 @@ class FakeCoordinator:
     last_update_success: bool = True
     last_exception: BaseException | None = None
     update_interval: timedelta = timedelta(minutes=30)
+    consecutive_failures: int = 0
 
 
 @dataclass

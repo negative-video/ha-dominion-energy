@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Callable, Iterable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date, datetime, timedelta
 from functools import partial
 import logging
@@ -127,6 +127,21 @@ _LOGGER = logging.getLogger(__name__)
 
 type DominionEnergyConfigEntry = ConfigEntry[DominionEnergyCoordinator]
 
+# How long the last good payload keeps being served once cycles start failing.
+#
+# The API publishes exactly one new day per day, so a payload less than 24
+# hours old is as current as the source ever gets. Blanking every entity the
+# first time an hourly poll fails throws away nothing but availability: the
+# numbers are still the same true numbers for the day they are labelled with,
+# and `data_date` says which day that is. Past the window the data really is
+# behind and going unavailable is the honest answer.
+STALE_DATA_GRACE = timedelta(hours=24)
+
+# Characters of an API error body carried into a log line. Long enough for the
+# WAF block pages and JSON fault documents Dominion answers with, short enough
+# not to bury the log.
+MAX_ERROR_BODY_CHARS = 300
+
 
 def _stat_start_utc(stat: Mapping[str, Any]) -> datetime:
     """Return a statistic row's start as an aware UTC datetime."""
@@ -189,6 +204,55 @@ def _earliest_priceable_date(cost_mode: str) -> date | None:
     if cost_mode != COST_MODE_SCHEDULE_1:
         return None
     return min(schedule.effective_from for schedule in VA_SCHEDULE_1_HISTORY)
+
+
+def describe_api_error(err: Exception, secrets: Iterable[Any] = ()) -> str:
+    """Render an API failure with enough detail to act on.
+
+    `str(ApiError)` is `"API error: 400"` and nothing else, which says the
+    request was refused but not why -- and a 400 from this API can mean an
+    inverted date window, an account the token does not cover, or a WAF block
+    page served under the wrong status. The response body distinguishes them,
+    so it rides along.
+
+    The body is squashed onto one line, truncated, and has the account and
+    meter numbers masked out: these lines end up in issue reports, and the
+    fault documents echo the request back verbatim.
+    """
+    message = str(err)
+    body = getattr(err, "response_text", None)
+    if not body:
+        return message
+
+    detail = " ".join(str(body).split())
+    for secret in secrets:
+        # Short values would match half the body; only mask real identifiers.
+        # `None` is explicitly skipped rather than stringified, or an entry
+        # missing a meter number would mask every "None" in the response.
+        if secret is None:
+            continue
+        text = str(secret)
+        if len(text) >= 4:
+            detail = detail.replace(text, "***")
+    if len(detail) > MAX_ERROR_BODY_CHARS:
+        detail = f"{detail[:MAX_ERROR_BODY_CHARS]}... (truncated)"
+    return f"{message}: {detail}"
+
+
+def stale_data_is_serviceable(
+    last_success: datetime | None,
+    now: datetime,
+    grace: timedelta = STALE_DATA_GRACE,
+) -> bool:
+    """Return whether the last good payload may stand in for a failed cycle.
+
+    A payload with no recorded success behind it (an older release's data
+    restored across a restart) is never served: nothing is known about how old
+    it is, and guessing "fresh" is the wrong way to be wrong.
+    """
+    if last_success is None:
+        return False
+    return now - last_success < grace
 
 
 def statistics_window_is_fetchable(start_date: date, data_date: date) -> bool:
@@ -437,6 +501,13 @@ class DominionEnergyData:
     # sensor reads its value. None when no budget is set.
     period_budget: float | None = None
 
+    # When a cycle last completed without an API failure -- either fetching
+    # fresh data or deciding the day's data was already in hand. It stops
+    # advancing the moment cycles start failing, which is what makes it worth
+    # showing: the other sensors go on reading the last good numbers during
+    # the grace window, and this is the one that says how old they are.
+    last_success: datetime | None = None
+
     @property
     def budget_remaining(self) -> float | None:
         """Dollars left in the period's budget; negative once overspent."""
@@ -504,6 +575,10 @@ class DominionEnergyCoordinator(DataUpdateCoordinator[DominionEnergyData]):
         # Day whose data has already been fetched, so repeated update cycles
         # within the same day don't re-download the same Excel exports
         self._cached_data_date: date | None = None
+        # Consecutive cycles that failed outright. Used to log the first
+        # degraded cycle loudly and the rest quietly, and reported in
+        # diagnostics so an intermittent API shows up as a count.
+        self._consecutive_failures: int = 0
         # Imports rewrite the whole statistics chain, so two running at once
         # would interleave their sums.
         self._import_lock = asyncio.Lock()
@@ -516,6 +591,11 @@ class DominionEnergyCoordinator(DataUpdateCoordinator[DominionEnergyData]):
     def options_changed(self, options: Mapping[str, Any]) -> bool:
         """Return True if options differ from the ones used to set up this run."""
         return dict(options) != self._options_snapshot
+
+    @property
+    def consecutive_failures(self) -> int:
+        """Cycles that have failed in a row since the last good one."""
+        return self._consecutive_failures
 
     @property
     def cost_mode(self) -> str:
@@ -718,8 +798,53 @@ class DominionEnergyCoordinator(DataUpdateCoordinator[DominionEnergyData]):
             return False
 
     async def _async_update_data(self) -> DominionEnergyData:
-        """Fetch data from the API."""
-        return await self._async_fetch_data(allow_reauth=True)
+        """Fetch data from the API, riding out a transient failure.
+
+        A source that publishes once a day does not become wrong because one
+        hourly poll was refused, so a failed cycle falls back to the last good
+        payload for as long as `STALE_DATA_GRACE` allows rather than taking
+        every entity unavailable and stalling the Energy Dashboard.
+
+        Only `UpdateFailed` is absorbed. `ConfigEntryAuthFailed` passes
+        straight through: credentials that need attention need it now, and
+        hiding that behind day-old data would be the wrong kind of patience.
+        """
+        try:
+            data = await self._async_fetch_data(allow_reauth=True)
+        except UpdateFailed as err:
+            return self._serve_last_good_data(err)
+
+        if self._consecutive_failures:
+            _LOGGER.info(
+                "Data is flowing again after %d failed cycle(s)",
+                self._consecutive_failures,
+            )
+        self._consecutive_failures = 0
+        return replace(data, last_success=dt_util.now())
+
+    def _serve_last_good_data(self, err: UpdateFailed) -> DominionEnergyData:
+        """Fall back to the last good payload, or re-raise once it is stale."""
+        self._consecutive_failures += 1
+
+        cached = self.data
+        now = dt_util.now()
+        if cached is None or not stale_data_is_serviceable(cached.last_success, now):
+            raise err
+
+        # Loud once, quiet after: an hourly poll against a source that
+        # publishes daily can fail for a while without anything being wrong at
+        # this end, and repeating the same warning 20 times helps nobody.
+        age = now - cached.last_success if cached.last_success else None
+        log = _LOGGER.warning if self._consecutive_failures == 1 else _LOGGER.debug
+        log(
+            "Update failed (%s); still serving data for %s, last refreshed %s ago "
+            "(%d consecutive failures)",
+            err,
+            cached.data_date,
+            age,
+            self._consecutive_failures,
+        )
+        return cached
 
     async def _async_fetch_data(self, *, allow_reauth: bool) -> DominionEnergyData:
         """Fetch data from the API.
@@ -769,7 +894,9 @@ class DominionEnergyCoordinator(DataUpdateCoordinator[DominionEnergyData]):
                     account_number=account_number,
                 )
             except ApiError as err:
-                _LOGGER.warning("Could not fetch bill forecast: %s", err)
+                _LOGGER.warning(
+                    "Could not fetch bill forecast: %s", self._describe(err)
+                )
                 bill_forecast = None
 
             # One interval fetch covering everything the sensors need, sliced
@@ -958,7 +1085,17 @@ class DominionEnergyCoordinator(DataUpdateCoordinator[DominionEnergyData]):
                 raise ConfigEntryAuthFailed(
                     "Authentication failed - please re-authenticate"
                 ) from err
-            raise UpdateFailed(f"API error: {err}") from err
+            raise UpdateFailed(self._describe(err)) from err
+
+    def _describe(self, err: Exception) -> str:
+        """Render an API error, masking this entry's own identifiers."""
+        return describe_api_error(
+            err,
+            secrets=(
+                self.config_entry.data.get(CONF_ACCOUNT_NUMBER),
+                self.config_entry.data.get(CONF_METER_NUMBER),
+            ),
+        )
 
     # Why the fallback is a nominal month and not the last bill's own length:
     # the last bill is a real meter-read-to-meter-read cycle, so borrowing its
