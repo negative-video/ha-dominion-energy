@@ -17,9 +17,12 @@ stubbed and the real module is imported.
 from __future__ import annotations
 
 import ast
+import asyncio
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 import importlib.util
+import logging
 from pathlib import Path
 import sys
 import types
@@ -184,6 +187,13 @@ STALE_DATA_GRACE = coordinator.STALE_DATA_GRACE
 MAX_ERROR_BODY_CHARS = coordinator.MAX_ERROR_BODY_CHARS
 resolve_statistic_id_prefix = coordinator.resolve_statistic_id_prefix
 DominionEnergyData = coordinator.DominionEnergyData
+DominionEnergyCoordinator = coordinator.DominionEnergyCoordinator
+# Whichever objects coordinator.py actually caught -- the real Home Assistant
+# classes when it is installed, the loader's stand-ins when it is not. Taking
+# them off the module rather than importing them keeps `pytest.raises` matching
+# the same class the code under test raises.
+UpdateFailed = coordinator.UpdateFailed
+ConfigEntryAuthFailed = coordinator.ConfigEntryAuthFailed
 # Bound staticmethods are callable straight off the class, so the breakdown
 # helper can be exercised without building a coordinator (which needs `hass`).
 projected_bill = coordinator.DominionEnergyCoordinator._projected_bill
@@ -767,25 +777,33 @@ class TestFilterIncompleteDaysAllowingGeneration:
         assert filter_incomplete_days_allowing_generation([]) == ([], [])
 
 
+def build_coordinator_data(**overrides: Any) -> Any:
+    """Build a ``DominionEnergyData`` with only the fields a test cares about.
+
+    Every required field gets an empty value so a test can name the two or
+    three it is actually about, and a new required field breaks one helper
+    rather than every call site.
+    """
+    base: dict[str, Any] = {
+        "intervals": [],
+        "latest_interval": None,
+        "daily_total": 0.0,
+        "monthly_total": 0.0,
+        "daily_cost": 0.0,
+        "monthly_cost": 0.0,
+        "bill_forecast": None,
+        "data_date": None,
+        "month_start_date": None,
+        "month_end_date": None,
+    }
+    base.update(overrides)
+    return DominionEnergyData(**base)
+
+
 class TestDominionEnergyDataContract:
     """The dataclass fields the sensor platform is coded against."""
 
-    @staticmethod
-    def _build(**overrides: Any) -> Any:
-        base: dict[str, Any] = {
-            "intervals": [],
-            "latest_interval": None,
-            "daily_total": 0.0,
-            "monthly_total": 0.0,
-            "daily_cost": 0.0,
-            "monthly_cost": 0.0,
-            "bill_forecast": None,
-            "data_date": None,
-            "month_start_date": None,
-            "month_end_date": None,
-        }
-        base.update(overrides)
-        return DominionEnergyData(**base)
+    _build = staticmethod(build_coordinator_data)
 
     def test_latest_generation_is_none_without_an_interval(self) -> None:
         assert self._build().latest_generation is None
@@ -949,6 +967,254 @@ class TestAuthFailuresAreNotAbsorbed:
             for handler in node.handlers
         ]
         assert handlers == ["UpdateFailed"], handlers
+
+
+FROZEN_NOW = datetime(2026, 8, 16, 12, 0, tzinfo=NY)
+
+
+class _Clock:
+    """Stand-in for ``dt_util``, exposing the one call these methods make.
+
+    Substituted for the whole module rather than patched onto it, so a future
+    ``dt_util`` call inside the code under test fails loudly here instead of
+    silently reading the wall clock and making these tests time-dependent.
+    """
+
+    def __init__(self, now: datetime) -> None:
+        self._now = now
+
+    def now(self) -> datetime:
+        return self._now
+
+    def advance(self, delta: timedelta) -> None:
+        self._now += delta
+
+
+@pytest.fixture
+def clock(monkeypatch: pytest.MonkeyPatch) -> _Clock:
+    """Pin the coordinator's idea of "now" so grace windows are exact."""
+    frozen = _Clock(FROZEN_NOW)
+    monkeypatch.setattr(coordinator, "dt_util", frozen)
+    return frozen
+
+
+class _StandInCoordinator:
+    """The real update-cycle methods on an object Home Assistant never built.
+
+    ``DominionEnergyCoordinator.__init__`` wants a ``hass``, a config entry
+    and a live client, none of which these two methods touch: between them
+    they read ``self.data``, ``self._consecutive_failures`` and
+    ``self._async_fetch_data`` and nothing else. Borrowing the functions off
+    the real class runs the shipped code rather than a paraphrase of it, which
+    is the whole point -- the alternative is asserting on the source text, and
+    ``TestAuthFailuresAreNotAbsorbed`` already does as much of that as is
+    worth doing.
+
+    ``outcomes`` is consumed one per cycle: an exception instance is raised,
+    anything else is returned, which is enough to script an outage and the
+    recovery on the other side of it.
+    """
+
+    _serve_last_good_data = DominionEnergyCoordinator._serve_last_good_data
+    _async_update_data = DominionEnergyCoordinator._async_update_data
+
+    def __init__(self, data: Any = None, outcomes: Sequence[Any] = ()) -> None:
+        self.data = data
+        self._consecutive_failures = 0
+        self._outcomes = list(outcomes)
+        self.reauth_flags: list[bool] = []
+
+    async def _async_fetch_data(self, *, allow_reauth: bool) -> Any:
+        self.reauth_flags.append(allow_reauth)
+        outcome = self._outcomes.pop(0)
+        if isinstance(outcome, BaseException):
+            raise outcome
+        return outcome
+
+
+def _cached(age: timedelta, **overrides: Any) -> Any:
+    """A payload that last refreshed ``age`` before the frozen now."""
+    overrides.setdefault("data_date", date(2026, 8, 15))
+    return build_coordinator_data(last_success=FROZEN_NOW - age, **overrides)
+
+
+class TestServeLastGoodData:
+    """The fallback itself, driven rather than read.
+
+    `stale_data_is_serviceable` decides *whether* a stale payload may stand
+    in; this is the method that acts on that decision, and the two ways it can
+    go wrong are invisible to a test of the predicate alone: re-raising the
+    wrong thing, and letting the grace window renew itself.
+    """
+
+    def test_a_fresh_payload_is_served_and_the_failure_counted(
+        self, clock: _Clock
+    ) -> None:
+        cached = _cached(timedelta(hours=2))
+        coord = _StandInCoordinator(data=cached)
+
+        assert coord._serve_last_good_data(UpdateFailed("API error: 400")) is cached
+        assert coord._consecutive_failures == 1
+
+    def test_a_failure_with_nothing_cached_reraises(self, clock: _Clock) -> None:
+        """The first cycle of a fresh entry has no payload to fall back on."""
+        coord = _StandInCoordinator(data=None)
+        err = UpdateFailed("API error: 400")
+
+        with pytest.raises(UpdateFailed) as raised:
+            coord._serve_last_good_data(err)
+
+        assert raised.value is err
+        assert coord._consecutive_failures == 1
+
+    def test_a_payload_past_the_grace_window_reraises(self, clock: _Clock) -> None:
+        coord = _StandInCoordinator(data=_cached(STALE_DATA_GRACE + timedelta(hours=1)))
+
+        with pytest.raises(UpdateFailed):
+            coord._serve_last_good_data(UpdateFailed("API error: 400"))
+
+    def test_a_payload_with_no_recorded_success_reraises(self, clock: _Clock) -> None:
+        """Data restored across a restart says nothing about its own age."""
+        coord = _StandInCoordinator(data=build_coordinator_data(last_success=None))
+
+        with pytest.raises(UpdateFailed):
+            coord._serve_last_good_data(UpdateFailed("API error: 400"))
+
+    def test_serving_a_payload_does_not_renew_its_own_window(
+        self, clock: _Clock
+    ) -> None:
+        """Otherwise every failure resets the clock and the data never expires.
+
+        Stamping the served payload would be the natural-looking mistake here,
+        and it would turn a 24-hour grace period into an unbounded one: each
+        failed cycle would hand back data marked fresh as of that failure.
+        """
+        cached = _cached(timedelta(hours=23))
+        coord = _StandInCoordinator(data=cached)
+
+        served = coord._serve_last_good_data(UpdateFailed("still down"))
+        assert served.last_success == FROZEN_NOW - timedelta(hours=23)
+
+        clock.advance(timedelta(hours=2))
+        with pytest.raises(UpdateFailed):
+            coord._serve_last_good_data(UpdateFailed("still down"))
+        assert coord._consecutive_failures == 2
+
+    def test_the_first_failure_warns_and_the_rest_go_quiet(
+        self, clock: _Clock, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Twenty identical warnings for one bad API night helps nobody."""
+        coord = _StandInCoordinator(data=_cached(timedelta(hours=2)))
+
+        with caplog.at_level(logging.DEBUG, logger=coordinator._LOGGER.name):
+            for _ in range(3):
+                coord._serve_last_good_data(UpdateFailed("API error: 400"))
+
+        assert [record.levelname for record in caplog.records] == [
+            "WARNING",
+            "DEBUG",
+            "DEBUG",
+        ]
+        assert "still serving data for 2026-08-15" in caplog.text
+
+
+class TestUpdateCycleOutcomes:
+    """`_async_update_data` end to end, one scripted cycle at a time.
+
+    Driven with `asyncio.run` from synchronous tests on purpose: the fast CI
+    gate runs the suite on plain pytest, and an `async def test_` there is
+    collected and skipped rather than failed -- which would leave the most
+    important assertions in this file quietly unrun.
+    """
+
+    def test_a_good_cycle_stamps_the_time_and_clears_the_count(
+        self, clock: _Clock
+    ) -> None:
+        coord = _StandInCoordinator(outcomes=[build_coordinator_data()])
+        coord._consecutive_failures = 4
+
+        data = asyncio.run(coord._async_update_data())
+
+        assert data.last_success == FROZEN_NOW
+        assert coord._consecutive_failures == 0
+        assert coord.reauth_flags == [True]
+
+    def test_a_refused_cycle_serves_the_cached_payload(self, clock: _Clock) -> None:
+        """The entities keep their values instead of all going unavailable."""
+        cached = _cached(timedelta(hours=3))
+        coord = _StandInCoordinator(
+            data=cached, outcomes=[UpdateFailed("API error: 400")]
+        )
+
+        assert asyncio.run(coord._async_update_data()) is cached
+        assert coord._consecutive_failures == 1
+
+    def test_an_auth_failure_is_not_absorbed(self, clock: _Clock) -> None:
+        """Day-old data must not hide the "Reauthenticate" button.
+
+        The structural counterpart of this lives in
+        `TestAuthFailuresAreNotAbsorbed`; this one proves the behaviour, and
+        additionally that an auth failure is not miscounted as one of the
+        transient failures the grace window is for.
+        """
+        coord = _StandInCoordinator(
+            data=_cached(timedelta(hours=3)),
+            outcomes=[ConfigEntryAuthFailed("re-authenticate")],
+        )
+
+        with pytest.raises(ConfigEntryAuthFailed):
+            asyncio.run(coord._async_update_data())
+
+        assert coord._consecutive_failures == 0
+
+    def test_recovery_resets_the_count_and_says_so(
+        self, clock: _Clock, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        coord = _StandInCoordinator(
+            data=_cached(timedelta(hours=1)),
+            outcomes=[
+                UpdateFailed("API error: 400"),
+                UpdateFailed("API error: 400"),
+                build_coordinator_data(data_date=date(2026, 8, 16)),
+            ],
+        )
+
+        asyncio.run(coord._async_update_data())
+        asyncio.run(coord._async_update_data())
+        assert coord._consecutive_failures == 2
+
+        with caplog.at_level(logging.INFO, logger=coordinator._LOGGER.name):
+            recovered = asyncio.run(coord._async_update_data())
+
+        assert coord._consecutive_failures == 0
+        assert recovered.last_success == FROZEN_NOW
+        assert "flowing again after 2" in caplog.text
+
+    def test_a_recovered_cycle_replaces_the_payload_it_was_serving(
+        self, clock: _Clock
+    ) -> None:
+        """The fallback must not leave the stale payload latched in place."""
+        stale = _cached(timedelta(hours=3))
+        fresh = build_coordinator_data(data_date=date(2026, 8, 16))
+        coord = _StandInCoordinator(
+            data=stale, outcomes=[UpdateFailed("API error: 400"), fresh]
+        )
+
+        assert asyncio.run(coord._async_update_data()).data_date == date(2026, 8, 15)
+        assert asyncio.run(coord._async_update_data()).data_date == date(2026, 8, 16)
+
+    def test_an_outage_outlasting_the_window_gives_up(self, clock: _Clock) -> None:
+        """Past a full publication cycle the data really is behind."""
+        cached = _cached(timedelta(hours=1))
+        coord = _StandInCoordinator(
+            data=cached, outcomes=[UpdateFailed("API error: 400")] * 2
+        )
+
+        assert asyncio.run(coord._async_update_data()) is cached
+
+        clock.advance(STALE_DATA_GRACE)
+        with pytest.raises(UpdateFailed):
+            asyncio.run(coord._async_update_data())
 
 
 class TestInvertedStatisticsWindow:
