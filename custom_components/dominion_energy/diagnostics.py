@@ -211,6 +211,29 @@ def summarize_bill_forecast(forecast: Any) -> dict[str, Any] | None:
     }
 
 
+def summarize_daily_totals(daily: Any) -> list[dict[str, Any]] | None:
+    """Render `(day, kWh, cost)` triples with the rate each implies."""
+    if not daily:
+        return None
+    rows: list[dict[str, Any]] = []
+    for entry in daily:
+        try:
+            day, kwh, cost = entry
+            kwh = float(kwh)
+            cost = float(cost)
+        except (TypeError, ValueError):
+            continue
+        rows.append(
+            {
+                "day": str(day),
+                "kwh": round(kwh, 3),
+                "cost": round(cost, 2),
+                "rate": round(cost / kwh, 4) if kwh else None,
+            }
+        )
+    return rows or None
+
+
 def build_diagnostics(
     *,
     entry_data: Any,
@@ -227,6 +250,7 @@ def build_diagnostics(
     coordinator_data: Any,
     consecutive_failures: Any = None,
     has_statistics: Any = None,
+    daily_totals: Any = None,
     ha_version: Any = None,
     dompower_version: Any = None,
 ) -> dict[str, Any]:
@@ -326,6 +350,12 @@ def build_diagnostics(
             # Statistic IDs embed the account number, so only presence is
             # reported here.
             "has_statistics": has_statistics,
+            # What the Energy Dashboard actually draws, day by day, with the
+            # rate each day works out at. A chain seeded from the wrong row
+            # leaves every hourly value correct and shows up only here, as one
+            # day priced unlike its neighbours -- so a diagnostics dump that
+            # omitted this could not distinguish it from a real tariff.
+            "daily": summarize_daily_totals(daily_totals),
         },
         "versions": {
             # Resolved by the caller off the event loop when one is running;
@@ -360,6 +390,15 @@ async def async_get_config_entry_diagnostics(
     if prefix:
         has_statistics = await _async_has_statistics(hass, str(prefix))
 
+    # The day totals the Energy Dashboard would draw, so a support request
+    # carries the evidence for a cost anomaly instead of a description of one.
+    daily_totals: Any = None
+    if coordinator is not None:
+        try:
+            daily_totals = await coordinator.async_recent_daily_totals()
+        except Exception:  # noqa: BLE001 - diagnostics must never be what raises
+            daily_totals = None
+
     # importlib.metadata reads the filesystem (listdir + open + read_text), which
     # Home Assistant flags as a blocking call when done in the event loop.
     dompower_version = await hass.async_add_executor_job(_dompower_version)
@@ -379,6 +418,7 @@ async def async_get_config_entry_diagnostics(
         coordinator_data=getattr(coordinator, "data", None),
         consecutive_failures=getattr(coordinator, "consecutive_failures", None),
         has_statistics=has_statistics,
+        daily_totals=daily_totals,
         ha_version=getattr(hass.config, "version", None),
         dompower_version=dompower_version,
     )

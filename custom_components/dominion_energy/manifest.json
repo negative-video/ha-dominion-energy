@@ -3,12 +3,12 @@
   "name": "Dominion Energy",
   "codeowners": [],
   "config_flow": true,
-  "dependencies": ["recorder"],
+  "dependencies": ["recorder", "repairs"],
   "documentation": "https://github.com/YeomansIII/ha-dominion-energy",
   "iot_class": "cloud_polling",
   "issue_tracker": "https://github.com/YeomansIII/ha-dominion-energy/issues",
   "requirements": [
     "https://github.com/negative-video/dompower/releases/download/v0.3.0/dompower-0.3.0-py3-none-any.whl#dompower==0.3.0"
   ],
-  "version": "1.5.6"
+  "version": "1.5.7"
 }

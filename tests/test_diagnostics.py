@@ -602,3 +602,65 @@ class TestDompowerVersionIsInjectable:
         payload = _build({}, {}, None)
         assert isinstance(payload["versions"]["dompower"], str)
         assert payload["versions"]["dompower"]
+
+
+class TestSummarizeDailyTotals:
+    """The day totals that make a cost anomaly legible in a bug report.
+
+    Every hourly value stays correct when a chain is seeded from the wrong
+    row -- the fault is only visible as day totals, which is what the Energy
+    Dashboard draws and what a user would be alarmed by. A dump without these
+    could not tell a duplicated day from a real tariff.
+    """
+
+    @staticmethod
+    def _summarize(daily: Any) -> Any:
+        return _load_diagnostics().summarize_daily_totals(daily)
+
+    def test_it_reports_the_rate_each_day_implies(self) -> None:
+        rows = self._summarize(
+            [
+                (date(2026, 8, 14), 78.048, 14.40),
+                (date(2026, 8, 15), 90.254, 32.95),
+            ]
+        )
+        assert rows == [
+            {"day": "2026-08-14", "kwh": 78.048, "cost": 14.4, "rate": 0.1845},
+            {"day": "2026-08-15", "kwh": 90.254, "cost": 32.95, "rate": 0.3651},
+        ]
+
+    def test_nothing_recorded_reports_nothing(self) -> None:
+        assert self._summarize([]) is None
+        assert self._summarize(None) is None
+
+    def test_an_empty_day_does_not_divide_by_zero(self) -> None:
+        (row,) = self._summarize([(date(2026, 8, 15), 0.0, 0.0)])
+        assert row["rate"] is None
+
+    def test_a_malformed_row_is_skipped_not_raised(self) -> None:
+        """Diagnostics must never be the thing that fails during a bug report."""
+        rows = self._summarize([("nonsense",), (date(2026, 8, 15), 90.254, 16.34)])
+        assert rows == [
+            {"day": "2026-08-15", "kwh": 90.254, "cost": 16.34, "rate": 0.1810}
+        ]
+
+    def test_the_totals_reach_the_payload(self) -> None:
+        diagnostics = _load_diagnostics()
+        payload = diagnostics.build_diagnostics(
+            entry_data={},
+            entry_options={},
+            entry_version=2,
+            entry_minor_version=1,
+            entry_source="user",
+            entry_state=None,
+            entry_disabled_by=None,
+            entry_pref_disable_polling=None,
+            last_update_success=True,
+            last_exception=None,
+            update_interval=None,
+            coordinator_data=None,
+            daily_totals=[(date(2026, 8, 15), 90.254, 16.34)],
+        )
+        assert payload["statistics"]["daily"] == [
+            {"day": "2026-08-15", "kwh": 90.254, "cost": 16.34, "rate": 0.1810}
+        ]

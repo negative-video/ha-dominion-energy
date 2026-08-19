@@ -6,6 +6,7 @@ import asyncio
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import date, datetime, timedelta
+from enum import Enum
 from functools import partial
 import logging
 from typing import Any
@@ -33,11 +34,13 @@ from homeassistant.components.recorder.models import (
 from homeassistant.components.recorder.statistics import (
     async_add_external_statistics,
     get_last_statistics,
+    statistics_during_period,
 )
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import UnitOfEnergy
 from homeassistant.core import HomeAssistant, State
 from homeassistant.exceptions import ConfigEntryAuthFailed, HomeAssistantError
+from homeassistant.helpers import issue_registry as ir
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.update_coordinator import (
     DataUpdateCoordinator,
@@ -120,6 +123,7 @@ from .usage import (
     day_looks_complete,
     deduplicate_hourly_by_utc,
     filter_incomplete_days,
+    find_cost_anomalies,
     shift_months,
 )
 
@@ -136,6 +140,36 @@ type DominionEnergyConfigEntry = ConfigEntry[DominionEnergyCoordinator]
 # and `data_date` says which day that is. Past the window the data really is
 # behind and going unavailable is the honest answer.
 STALE_DATA_GRACE = timedelta(hours=24)
+
+# How far back the cost audit looks. Long enough for the median to describe a
+# household rather than a weekend, short enough that a day flagged here is
+# still inside the window a user is likely to be looking at.
+COST_AUDIT_DAYS = 14
+
+
+class ReauthOutcome(Enum):
+    """What an automatic re-authentication attempt actually established.
+
+    The distinction is the whole point. `ConfigEntryAuthFailed` puts the
+    "Reauthenticate" button in front of the user and is deliberately *not*
+    absorbed by `STALE_DATA_GRACE`, so raising it takes every entity
+    unavailable at once. That is right for a password the utility no longer
+    accepts and wrong for a router that is rebooting: the refresh token expires
+    about once a day, so any outage long enough to span one cycle used to end
+    with the integration demanding credentials that were never the problem.
+    """
+
+    SUCCEEDED = "succeeded"
+    #: The login endpoint answered, and the answer needs a human: bad
+    #: credentials, or two-factor that only the account holder can complete.
+    NEEDS_USER = "needs_user"
+    #: The login endpoint could not be reached, or failed in a way that says
+    #: nothing about the credentials. Treated as a transient failure, which
+    #: costs at most `STALE_DATA_GRACE` of patience before the entities go
+    #: unavailable anyway -- cheaper than sending someone through a two-factor
+    #: round trip that was never going to help.
+    UNREACHABLE = "unreachable"
+
 
 # Characters of an API error body carried into a log line. Long enough for the
 # WAF block pages and JSON fault documents Dominion answers with, short enough
@@ -732,10 +766,12 @@ class DominionEnergyCoordinator(DataUpdateCoordinator[DominionEnergyData]):
             name = f"{name} meter ...{meter_number[-8:]}"
         return f"{name} {kind}"
 
-    async def _async_attempt_reauth(self) -> bool:
+    async def _async_attempt_reauth(self) -> ReauthOutcome:
         """Attempt to re-authenticate using stored credentials.
 
-        Returns True if successful, False if manual reauth needed.
+        Reports which of the three things happened rather than a bare success
+        flag; see `ReauthOutcome` for why the two failure modes must not be
+        collapsed back together.
         """
         username = self.config_entry.data.get(CONF_USERNAME)
         password = self.config_entry.data.get(CONF_PASSWORD)
@@ -743,7 +779,7 @@ class DominionEnergyCoordinator(DataUpdateCoordinator[DominionEnergyData]):
 
         if not username or not password:
             _LOGGER.warning("No stored credentials for auto-reauth")
-            return False
+            return ReauthOutcome.NEEDS_USER
 
         _LOGGER.info("Attempting automatic re-authentication for %s", username)
         session = async_get_clientsession(self.hass)
@@ -782,20 +818,24 @@ class DominionEnergyCoordinator(DataUpdateCoordinator[DominionEnergyData]):
             )
 
             _LOGGER.info("Successfully re-authenticated with stored credentials")
-            return True
+            return ReauthOutcome.SUCCEEDED
 
         except TFARequiredError:
             _LOGGER.info("TFA required during reauth - manual intervention needed")
-            return False
+            return ReauthOutcome.NEEDS_USER
         except InvalidCredentialsError as err:
             _LOGGER.warning("Auto-reauth failed - credentials invalid: %s", err)
-            return False
+            return ReauthOutcome.NEEDS_USER
         except CannotConnectError as err:
-            _LOGGER.warning("Auto-reauth failed - connection error: %s", err)
-            return False
+            _LOGGER.warning("Auto-reauth failed - login endpoint unreachable: %s", err)
+            return ReauthOutcome.UNREACHABLE
         except Exception as err:
+            # Deliberately the transient answer. An unexpected exception says
+            # nothing about the credentials, and of the two ways to be wrong,
+            # waiting out the grace window costs less than sending someone
+            # through two-factor for a library bug or a changed payload.
             _LOGGER.warning("Auto-reauth failed unexpectedly: %s", err)
-            return False
+            return ReauthOutcome.UNREACHABLE
 
     async def _async_update_data(self) -> DominionEnergyData:
         """Fetch data from the API, riding out a transient failure.
@@ -1015,6 +1055,8 @@ class DominionEnergyCoordinator(DataUpdateCoordinator[DominionEnergyData]):
             statistics_settled = await self._insert_statistics(
                 yesterday, bill_forecast, has_generation=has_generation
             )
+            if statistics_settled:
+                await self._async_audit_cost_statistics()
 
             # Only cache the day once the API published all of it and the
             # statistics are settled, so a partially published day or a backfill
@@ -1187,16 +1229,30 @@ class DominionEnergyCoordinator(DataUpdateCoordinator[DominionEnergyData]):
     ) -> DominionEnergyData:
         """Try to recover from an expired refresh token, then hand off.
 
-        Never returns normally: either the retry produces data or
-        `ConfigEntryAuthFailed` starts the reauth flow. Raising that is what
-        puts the "Reauthenticate" button in front of the user, which is far
-        less work for them than the full credentials-and-two-factor round trip
-        that Reconfigure demands.
+        Never returns normally: either the retry produces data, or one of two
+        different failures is raised. `ConfigEntryAuthFailed` puts the
+        "Reauthenticate" button in front of the user, which is far less work
+        for them than the full credentials-and-two-factor round trip that
+        Reconfigure demands -- but it also bypasses `STALE_DATA_GRACE`, so it
+        is reserved for a login endpoint that answered and said no. An endpoint
+        that could not be reached raises `UpdateFailed` instead and rides out
+        the grace window with every other transient failure.
         """
         _LOGGER.info("Refresh token expired, attempting auto-reauth")
-        if allow_reauth and await self._async_attempt_reauth():
+        outcome = (
+            await self._async_attempt_reauth()
+            if allow_reauth
+            # The retry already had its one chance; a token that expires again
+            # immediately is not something another login round will fix.
+            else ReauthOutcome.NEEDS_USER
+        )
+        if outcome is ReauthOutcome.SUCCEEDED:
             # Retry the update once with new tokens, never deeper
             return await self._async_fetch_data(allow_reauth=False)
+        if outcome is ReauthOutcome.UNREACHABLE:
+            raise UpdateFailed(
+                "Refresh token expired and the login endpoint is unreachable"
+            ) from err
         raise ConfigEntryAuthFailed(
             "Authentication failed - please re-authenticate"
         ) from err
@@ -1615,6 +1671,201 @@ class DominionEnergyCoordinator(DataUpdateCoordinator[DominionEnergyData]):
             get_last_statistics, self.hass, 1, statistic_id, True, {"sum"}
         )
 
+    @property
+    def _cost_anomaly_issue_id(self) -> str:
+        """Repair issue identifying a bad cost day on this entry."""
+        return f"cost_anomaly_{self.config_entry.entry_id}"
+
+    @staticmethod
+    def _chain_end(stats: Mapping[str, Any], stat_id: str | None) -> datetime | None:
+        """UTC start of a chain's newest recorded row, or None if it has none."""
+        if stat_id is None:
+            return None
+        rows = stats.get(stat_id)
+        if not rows:
+            return None
+        try:
+            return _stat_start_utc(rows[0])
+        except (KeyError, TypeError, ValueError):
+            return None
+
+    def _warn_if_chains_disagree(
+        self,
+        consumption_stat_id: str,
+        last_stat: Mapping[str, Any],
+        cost_stat_id: str,
+        last_cost_stat: Mapping[str, Any],
+    ) -> None:
+        """Say so when the two chains do not end at the same hour.
+
+        They are written by separate `async_add_external_statistics` calls, so
+        an unclean shutdown between them -- a power cut, a container killed
+        mid-cycle -- can commit one and not the other. The seeding rule in
+        `_update_statistics` means that no longer costs anyone a duplicated
+        day, but it is the fingerprint of an interrupted write and is worth
+        saying out loud rather than healing in silence: it is the difference
+        between a bug report that names the cause and one that does not.
+        """
+        consumption_end = self._chain_end(last_stat, consumption_stat_id)
+        cost_end = self._chain_end(last_cost_stat, cost_stat_id)
+        if consumption_end is None or cost_end is None or consumption_end == cost_end:
+            return
+        _LOGGER.warning(
+            "Statistics chains are out of step: %s ends at %s, %s ends at %s. "
+            "A previous cycle was interrupted. Both are reseeded from the "
+            "recorder on this update, so no history is lost.",
+            consumption_stat_id,
+            consumption_end,
+            cost_stat_id,
+            cost_end,
+        )
+
+    async def _async_daily_totals(
+        self, consumption_stat_id: str, cost_stat_id: str, days: int
+    ) -> list[tuple[date, float, float]]:
+        """Day totals for both chains, exactly as the Energy Dashboard reads them.
+
+        `change` rather than `sum` on purpose: it is the per-day difference of
+        the cumulative sums, which is the number the dashboard draws and so the
+        number a user would be alarmed by. Auditing the raw sums instead would
+        miss the entire class of fault where every hourly value is correct and
+        only the joins between windows are wrong.
+        """
+        end = dt_util.start_of_local_day()
+        start = end - timedelta(days=days)
+        rows = await get_instance(self.hass).async_add_executor_job(
+            partial(
+                statistics_during_period,
+                self.hass,
+                dt_util.as_utc(start),
+                dt_util.as_utc(end),
+                {consumption_stat_id, cost_stat_id},
+                "day",
+                None,
+                {"change"},
+            )
+        )
+
+        local_tz = dt_util.get_default_time_zone()
+
+        def by_day(stat_id: str) -> dict[date, float]:
+            totals: dict[date, float] = {}
+            for row in rows.get(stat_id, []):
+                change = row.get("change")
+                if change is None:
+                    continue
+                start_utc = dt_util.utc_from_timestamp(float(row["start"]))
+                totals[start_utc.astimezone(local_tz).date()] = float(change)
+            return totals
+
+        kwh = by_day(consumption_stat_id)
+        cost = by_day(cost_stat_id)
+        return [(day, kwh[day], cost[day]) for day in sorted(kwh.keys() & cost.keys())]
+
+    async def async_recent_daily_totals(self) -> list[tuple[date, float, float]]:
+        """Day totals over the audit window, for diagnostics.
+
+        The same view the audit judges and the Energy Dashboard draws, so a
+        support request carries the evidence for a cost anomaly rather than a
+        description of one.
+        """
+        consumption_stat_id, cost_stat_id, _generation_stat_id = self._statistic_ids()
+        return await self._async_daily_totals(
+            consumption_stat_id, cost_stat_id, COST_AUDIT_DAYS
+        )
+
+    async def _async_audit_cost_statistics(self) -> None:
+        """Raise a repair when a recorded day is priced unlike its neighbours.
+
+        This exists because of who reads the Energy Dashboard. A day at twice
+        the going rate looks exactly like a billing error, and the reasonable
+        thing for someone to do about a billing error is phone their utility --
+        about a number their utility never produced, cannot see, and cannot
+        explain. The repair says whose fault it is, in the place the user is
+        already looking, and offers to fix it.
+
+        Failures here are swallowed deliberately: an audit that cannot run is
+        not a reason to fail a refresh that otherwise succeeded.
+        """
+        try:
+            daily = await self.async_recent_daily_totals()
+        except (HomeAssistantError, KeyError, TypeError, ValueError) as err:
+            _LOGGER.debug("Could not audit cost statistics: %s", err)
+            return
+
+        anomalies = find_cost_anomalies(daily)
+        if not anomalies:
+            ir.async_delete_issue(self.hass, DOMAIN, self._cost_anomaly_issue_id)
+            return
+
+        worst = max(
+            anomalies, key=lambda anomaly: max(anomaly.ratio, 1 / anomaly.ratio)
+        )
+        _LOGGER.warning(
+            "Recorded cost for %s is %.2fx the surrounding days (%.4f $/kWh "
+            "against %.4f over %.1f kWh). This is an artifact of how history is "
+            "stored here, not a charge from the utility.",
+            worst.day,
+            worst.ratio,
+            worst.rate,
+            worst.baseline_rate,
+            worst.kwh,
+        )
+        ir.async_create_issue(
+            self.hass,
+            DOMAIN,
+            self._cost_anomaly_issue_id,
+            is_fixable=True,
+            severity=ir.IssueSeverity.WARNING,
+            translation_key="cost_anomaly",
+            translation_placeholders={
+                "day": worst.day.isoformat(),
+                "cost": f"{worst.cost:.2f}",
+                "kwh": f"{worst.kwh:.1f}",
+                "rate": f"{worst.rate:.3f}",
+                "baseline": f"{worst.baseline_rate:.3f}",
+                "days": str(len(anomalies)),
+            },
+            data={"entry_id": self.config_entry.entry_id},
+        )
+
+    async def async_rebuild_cost_statistics(self) -> None:
+        """Recompute the recorded cost history over the window the API still has.
+
+        Where both the repair flow and the `rebuild_cost_statistics` service
+        land. Correcting a bad cumulative sum otherwise means Developer Tools ->
+        Statistics or a WebSocket command, which is well past what most people
+        installing a HACS integration will attempt -- and leaving them with a
+        wrong number they cannot fix is how a statistics artifact turns into a
+        phone call to the power company.
+
+        Rewriting is safe: `async_add_external_statistics` overwrites rows by
+        (statistic_id, start), and the rebuild reseeds from the sum immediately
+        before the window, so the chain stays continuous either side of it.
+        """
+        if self._client is None:
+            await self._async_setup()
+        assert self._client is not None
+
+        _consumption_stat_id, cost_stat_id, _generation_stat_id = self._statistic_ids()
+
+        bill_forecast: BillForecast | None = None
+        try:
+            bill_forecast = await self._client.async_get_bill_forecast(
+                account_number=self.config_entry.data[CONF_ACCOUNT_NUMBER],
+            )
+        except (ApiError, CannotConnectError) as err:
+            # Only `api_estimate` needs it; every other mode prices from the
+            # tariff and rebuilds perfectly well without one.
+            _LOGGER.warning(
+                "Rebuilding cost statistics without a bill forecast: %s",
+                self._describe(err),
+            )
+
+        await self._rebuild_cost_statistics(cost_stat_id, bill_forecast)
+        ir.async_delete_issue(self.hass, DOMAIN, self._cost_anomaly_issue_id)
+        await self.async_request_refresh()
+
     async def _insert_statistics(
         self,
         data_date: date,
@@ -1718,6 +1969,10 @@ class DominionEnergyCoordinator(DataUpdateCoordinator[DominionEnergyData]):
         # All expected statistics exist - reset backfill flag
         self._backfill_initiated = False
 
+        self._warn_if_chains_disagree(
+            consumption_stat_id, last_stat, cost_stat_id, last_cost_stat
+        )
+
         if self.config_entry.data.get(CONF_COST_SIGNATURE) != cost_signature:
             # The cost calculation changed (or this is the first run after an
             # upgrade), so the recorded cost history no longer matches the
@@ -1798,20 +2053,22 @@ class DominionEnergyCoordinator(DataUpdateCoordinator[DominionEnergyData]):
         return best_sum
 
     async def _find_last_complete_day_stat(
-        self,
-        consumption_stat_id: str,
-    ) -> tuple[date | None, float]:
-        """Walk backwards to find the last stat from a fully-populated day.
+        self, consumption_stat_id: str
+    ) -> date | None:
+        """Walk backwards to find the last date that was fully populated.
 
         A fully-populated day has non-zero data extending to at least hour 22
         local time. Days with data only at hour 00:00 are artifacts from
         a previous buggy version and should be skipped.
 
-        Consumption only: the cost and generation chains are reseeded from the
-        rewrite window in `_update_statistics`, not paired to this row.
+        The date only, deliberately. The row that proves a day complete is the
+        first one at hour 22 *or later*, which on a day whose 23:00 row was
+        written as a stale zero is the 22:00 row -- and seeding the chain from
+        there while rewriting from the following day drops 23:00 out of the
+        running total. Every chain is instead reseeded from the rewrite window
+        in `_update_statistics`, which cannot land mid-day.
 
-        Returns (date, consumption_sum) of the last stat from a complete day,
-        or (None, 0.0) if none found.
+        Returns the date of the last complete day, or None if there is none.
         """
         local_tz = dt_util.get_default_time_zone()
 
@@ -1826,7 +2083,7 @@ class DominionEnergyCoordinator(DataUpdateCoordinator[DominionEnergyData]):
             {"state", "sum"},
         )
         if not last_stats.get(consumption_stat_id):
-            return None, 0.0
+            return None
 
         # Walk backwards to find the last stat with state > 0 at hour >= 22
         # (indicating the end of a fully-populated day, not a sparse artifact).
@@ -1848,10 +2105,9 @@ class DominionEnergyCoordinator(DataUpdateCoordinator[DominionEnergyData]):
                 # Keep looking further back for a complete day.
                 continue
 
-            consumption_sum = float(stat_data.get("sum") or 0)
-            return stat_local.date(), consumption_sum
+            return stat_local.date()
 
-        return None, 0.0
+        return None
 
     async def _backfill_statistics(
         self,
@@ -2006,30 +2262,28 @@ class DominionEnergyCoordinator(DataUpdateCoordinator[DominionEnergyData]):
         """Update statistics with new data since last recorded statistic.
 
         The window to rewrite is decided from the consumption stream, which is
-        the one with the self-healing rules; the cost and generation chains
-        then continue from whatever they held immediately before that window.
-
-        Cost and generation are therefore reseeded from `start_date` once, below
-        the branches, and never from their own newest row. `last_cost_stat` is
-        deliberately not a parameter: seeding the cost chain from wherever that
-        chain happened to end is what let one day's cost be counted twice.
+        the one with the self-healing rules. Every chain -- consumption
+        included -- then continues from whatever it held immediately before
+        that window, reseeded once below the branches and never from its own
+        newest row. `last_cost_stat` is deliberately not a parameter: seeding
+        the cost chain from wherever that chain happened to end is what let one
+        day's cost be counted twice.
 
         Returns True when the statistics are up to date through data_date.
         """
         assert self._client is not None
 
         try:
-            # Get the last recorded statistic time and sum for consumption
+            # Where the consumption stream currently ends. Only the position
+            # matters here; the running total is read back from the window.
             last_stat_data = last_stat[consumption_stat_id][0]
             last_stat_start = last_stat_data["start"]
-            consumption_sum = float(last_stat_data.get("sum") or 0)
 
             _LOGGER.debug(
-                "Last statistic for %s: start=%s (type=%s), sum=%.3f",
+                "Last statistic for %s: start=%s (type=%s)",
                 consumption_stat_id,
                 last_stat_start,
                 type(last_stat_start).__name__,
-                consumption_sum,
             )
 
             # Convert to datetime for comparison
@@ -2074,29 +2328,27 @@ class DominionEnergyCoordinator(DataUpdateCoordinator[DominionEnergyData]):
         # If the last stat has state=0, walk backwards through recent stats
         # to find the last non-zero entry, then re-fetch from that point.
         last_state = float(last_stat_data.get("state") or 0)
-        # Set only where consumption restarts its chain at zero, so the cost and
-        # generation chains restart with it instead of continuing an older sum.
+        # Set only where the recorded history is judged unusable and the whole
+        # window is rebuilt from nothing, so every chain restarts at zero
+        # together instead of continuing an older sum.
         reset_chains = False
         if last_state == 0 and last_stat_date >= data_date:
             _LOGGER.info(
                 "Last statistic has state=0 at %s — scanning for last non-zero entry",
                 last_stat_date,
             )
-            (
-                last_good_date,
-                last_good_sum,
-            ) = await self._find_last_complete_day_stat(consumption_stat_id)
+            last_good_date = await self._find_last_complete_day_stat(
+                consumption_stat_id
+            )
             if last_good_date is not None:
                 _LOGGER.info(
-                    "Last non-zero statistic on %s (sum=%.3f). "
-                    "Re-fetching from %s to %s to heal stale zeros.",
+                    "Last complete day was %s. Re-fetching from %s to %s to heal "
+                    "stale zeros.",
                     last_good_date,
-                    last_good_sum,
                     last_good_date + timedelta(days=1),
                     data_date,
                 )
                 start_date = last_good_date + timedelta(days=1)
-                consumption_sum = last_good_sum
             else:
                 # All stats are zero — re-fetch everything
                 _LOGGER.warning(
@@ -2104,7 +2356,6 @@ class DominionEnergyCoordinator(DataUpdateCoordinator[DominionEnergyData]):
                     BACKFILL_DAYS,
                 )
                 start_date = dt_util.now().date() - timedelta(days=BACKFILL_DAYS)
-                consumption_sum = 0.0
                 reset_chains = True
         elif last_stat_date > data_date:
             _LOGGER.debug(
@@ -2131,18 +2382,9 @@ class DominionEnergyCoordinator(DataUpdateCoordinator[DominionEnergyData]):
                 last_stat_date,
                 last_stat_local.hour,
             )
+            # Rewriting from the start of the incomplete day; every chain is
+            # reseeded from immediately before it, below.
             start_date = last_stat_date
-
-            # Get the sum at the end of the day BEFORE the incomplete day
-            # by subtracting the state values we're about to replace
-            day_start_utc = dt_util.as_utc(
-                last_stat_local.replace(hour=0, minute=0, second=0, microsecond=0)
-            )
-            consumption_sum_before = await self._get_sum_before(
-                consumption_stat_id, day_start_utc
-            )
-            if consumption_sum_before is not None:
-                consumption_sum = consumption_sum_before
         else:
             # Fetch data from day after last stat to data_date
             start_date = last_stat_date + timedelta(days=1)
@@ -2169,46 +2411,45 @@ class DominionEnergyCoordinator(DataUpdateCoordinator[DominionEnergyData]):
             )
             return True
 
-        # The cost and generation chains are continued from whatever the
-        # recorder holds immediately before the window being (re)written,
-        # whichever branch above picked that window. Doing it once here keeps
-        # both in step with consumption without threading extra running totals
-        # through every self-healing branch.
+        # Every chain continues from whatever the recorder holds immediately
+        # before the window being (re)written, whichever branch above picked
+        # that window. One rule, applied once, rather than a running total
+        # threaded through every self-healing branch.
         #
-        # Deriving cost from `start_date` rather than from its own newest row is
-        # load-bearing, not tidiness. The two chains are written by separate
-        # `async_add_external_statistics` calls and are read back by separate
-        # queries, so a cycle that is interrupted -- or one that re-runs after a
-        # reload following an outage -- can leave cost ending a day later than
-        # consumption. Seeding from the cost chain's own end then adds the
-        # overlapping day on top of a sum that already contains it, and the
-        # whole duplicate lands in the first hour of the rewritten window: every
-        # hourly cost stays individually correct while the Energy Dashboard,
-        # which reads day totals as differences of cumulative sums, shows one
-        # day at roughly double. Observed once in the wild, 2026-08-15.
+        # This is load-bearing, not tidiness. The chains are written by separate
+        # `async_add_external_statistics` calls and read back by separate
+        # queries, so a cycle that is interrupted -- by an unclean shutdown
+        # between two writes, or by a reload landing on a recovery cycle after
+        # an outage -- can leave one chain ending a day later than another.
+        # Seeding a chain from its own end then adds the overlapping day on top
+        # of a sum that already contains it, and the whole duplicate lands in
+        # the first hour of the rewritten window: every hourly value stays
+        # individually correct while the Energy Dashboard, which reads day
+        # totals as differences of cumulative sums, shows that one day at
+        # roughly double. Observed in the wild on 2026-08-15, on the cost chain.
+        #
+        # Seeding from `start_date` cannot land mid-day, which is the other half
+        # of the guarantee: a seed taken from "the last row that proves the day
+        # complete" is the 22:00 row on a day whose 23:00 row was written as a
+        # stale zero, and 23:00 then falls out of the running total.
         window_start_utc = dt_util.as_utc(dt_util.start_of_local_day(start_date))
 
-        cost_sum = 0.0
-        if not reset_chains:
-            cost_sum = (
+        async def seed(stat_id: str | None) -> float:
+            """Cumulative sum to continue `stat_id` from, 0.0 for a fresh start."""
+            if stat_id is None or reset_chains:
+                return 0.0
+            return (
                 await self._get_sum_before(
-                    cost_stat_id,
+                    stat_id,
                     window_start_utc,
                     count=(BACKFILL_DAYS + 1) * 24,
                 )
                 or 0.0
             )
 
-        generation_sum = 0.0
-        if generation_stat_id and not reset_chains:
-            generation_sum = (
-                await self._get_sum_before(
-                    generation_stat_id,
-                    window_start_utc,
-                    count=(BACKFILL_DAYS + 1) * 24,
-                )
-                or 0.0
-            )
+        consumption_sum = await seed(consumption_stat_id)
+        cost_sum = await seed(cost_stat_id)
+        generation_sum = await seed(generation_stat_id)
 
         _LOGGER.info(
             "Fetching statistics update from %s to %s "

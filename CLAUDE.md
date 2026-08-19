@@ -26,7 +26,7 @@ Home Assistant custom integration (domain `dominion_energy`) for monitoring Domi
   3. **Do not score with mean absolute error.** Readings are whole kWh, which leaves MAE nearly flat — 1.24 to 1.57 across shifts on real data, picking the wrong answer — while correlation ranged 0.02 to 0.98 and was unambiguous. MAE is still reported, as a quality signal once the shift is known (≈0.25 is the expected rounding error; ≈1.2 means misaligned).
   4. **Correlation cannot see scale.** A misread unit or multiplier correlates perfectly while being orders of magnitude out, so `magnitude_looks_wrong()` compares daily averages separately. Also guarded: XML entity declarations, and ESPI `flowDirection` other than delivered.
 
-- **`usage.py`**: Pure helpers with **no Home Assistant imports** — interval filtering, hourly aggregation, UTC de-duplication, cumulative-sum building, and billing-period boundary maths. This is where testable logic belongs: `coordinator.py` cannot be imported without Home Assistant, so anything decidable should live here (or as a module-level helper in `coordinator.py`) rather than inside a method.
+- **`usage.py`**: Pure helpers with **no Home Assistant imports** — interval filtering, hourly aggregation, UTC de-duplication, cumulative-sum building, billing-period boundary maths, and `find_cost_anomalies()` (see *Catching a bad cost day*). This is where testable logic belongs: `coordinator.py` cannot be imported without Home Assistant, so anything decidable should live here (or as a module-level helper in `coordinator.py`) rather than inside a method.
 
 - **`rates.py`**: Full Virginia Residential Schedule 1 tariff (`VA_SCHEDULE_1`) plus the calculation engine — seasonal tiered distribution/generation rates, flat riders, transmission, and tiered consumption tax. `calculate_schedule1_interval_cost()` prices a single interval given cumulative kWh so far in the billing period.
 
@@ -40,6 +40,8 @@ Home Assistant custom integration (domain `dominion_energy`) for monitoring Domi
   1. **The baseline reads `hvac_action`, not the thermostat's state** — and the coordinator must fetch it with `get_significant_states(..., significant_changes_only=False)`. `hvac_action` is an *attribute*, so a cycling thermostat moves only `last_updated` while its state sits on `heat_cool`; `state_changes_during_period()` skips those rows and the filter silently does nothing. That shipped once: against a real ecobee it excluded 10 intervals out of 70 and the sensor reported the air conditioner as standing load. Thermostats reporting no action fall back to the mode (anything but `off` counts as running), which discards usable data rather than folding compressor draw into the answer.
   2. **The quiet hours come from the household, via `quietest_hours()`.** An overnight window assumes the house is asleep and the HVAC is off. On a real meter that cooled at night, midnight was the *second-heaviest* hour of the day and the quietest was 10 AM, so measuring 00:00-05:00 returned 1508 W — near enough the household's average draw. The window is taken from the 30-day profile, so no profile means no baseline.
   3. **Same-weekday, median, not a trailing mean.** Household electricity is strongly weekly; comparing a Saturday against a mostly-weekday window flags every Saturday. The median stops one already-exceptional day raising the bar and hiding the next.
+
+- **`repairs.py`**: One fix flow, for the `cost_anomaly` issue. It calls `coordinator.async_rebuild_cost_statistics()`, which is also what the `rebuild_cost_statistics` service calls. `manifest.json` therefore depends on `repairs`; an `is_fixable=True` issue without this module leaves a dead Repair button.
 
 - **`const.py`**: Config/option keys, the four cost-mode constants, `UPDATE_INTERVAL_MINUTES`, `BACKFILL_DAYS`, and rate defaults.
 
@@ -73,12 +75,32 @@ Up to three external statistics per entry: `dominion_energy:{prefix}_energy_cons
 
 Cost statistics are rebuilt when `CONF_COST_SIGNATURE` shows the cost-affecting options changed; the rebuild reseeds from the cumulative sum immediately *before* the rewritten window rather than from zero.
 
+**Every chain is seeded from the rewrite window, never from its own last row.** `_update_statistics` picks the window to rewrite from the consumption stream and then reseeds consumption, cost and generation alike from `_get_sum_before(start_of_local_day(start_date))`, through one `seed()` closure. This is load-bearing:
+
+- The chains are written by separate `async_add_external_statistics` calls and read back by separate queries, so an interrupted cycle — an unclean shutdown between two writes, a reload landing on a recovery cycle after an outage — can leave one chain ending a day later than another. Seeding a chain from its own end then adds the overlapping day on top of a sum that already contains it.
+- The failure is invisible in the hourly rows. Every one of them stays individually correct; the whole duplicate lands in the cumulative sum at the *first hour* of the window, and only the Energy Dashboard's day totals (differences of cumulative sums) show it. **Shipped once**: 2026-08-15 recorded 90.25 kWh at $32.95 instead of $16.34 — 0.365 $/kWh against a sixty-day band of 0.174–0.185 — written when the API returned from an eight-hour outage and the integration was reloaded ninety seconds later.
+- Seeding from `start_date` also cannot land mid-day. `_find_last_complete_day_stat()` accepts the first row at hour 22 *or later*, which on a day whose 23:00 row was written as a stale zero is the 22:00 row; seeding from there while rewriting from the next day drops 23:00 out of the running total. That is why the helper returns a date and nothing else.
+- `_warn_if_chains_disagree()` logs when the chains do not end at the same hour. It heals nothing — the seeding rule already did — but it is the fingerprint of an interrupted write, and a bug report that names the cause is worth the one line.
+
 Sharp edges already handled — do not regress them:
 
 - `_filter_incomplete_days()` drops days that are zero or barely populated, so partial days are not frozen into permanent zero statistics.
 - `_deduplicate_hourly_by_utc()` merges local hours that collapse to the same UTC instant on DST fall-back/spring-forward days.
 - `_find_last_complete_day_stat()` walks backwards past stale zero-value statistics written by older versions, and `_get_sum_before()` recovers the correct running sum when a day is re-processed.
 - `_backfill_initiated` guards against a second backfill firing before the recorder has committed the first.
+
+### Catching a Bad Cost Day
+
+After every settled statistics update, `_async_audit_cost_statistics()` reads the last `COST_AUDIT_DAYS` (14) of day totals back out of the recorder — `statistics_during_period` with `types={"change"}`, which is the per-day difference the Energy Dashboard actually draws — and hands them to `find_cost_anomalies()`. Days whose implied $/kWh is off the window's median by more than `COST_ANOMALY_TOLERANCE` (1.5×) in *either* direction raise a `cost_anomaly` repair issue, cleared automatically once they no longer do.
+
+Why the numbers are what they are:
+
+- **1.5× catches a duplicate and ignores a tariff.** A duplicated day is exactly twice its own rate, which measured 1.98× the median in the real incident. Sixty days of Schedule 1 on a real meter spanned 0.174–0.185 $/kWh — a factor of 1.06. The threshold sits well clear of both.
+- **Both directions.** High is a duplicated cost; low is a duplicated consumption day, or a chain reseeded from a sum that was too small. Neither is a billing fact.
+- **The median, over ≥ 7 days, ignoring days under 1 kWh.** A fresh install is not evidence, and dividing a cost by a nearly-empty day measures rounding rather than the tariff.
+- **The audit judges day totals, not the raw sums.** The entire fault class it exists for leaves every hourly value correct and corrupts only the joins between windows; auditing sums would miss all of it.
+
+**The repair's wording is the point, not decoration.** A day at twice the going rate looks exactly like a billing error, and the reasonable response to a billing error is to phone the utility — about a number the utility never produced, cannot see, and cannot explain. The issue text says whose fault it is, that the bill is unaffected, and offers the fix. `tests/test_translations.py` fails if a registered service or a fixable issue loses its strings.
 
 ### Surviving a Bad API Day
 
@@ -99,6 +121,7 @@ Before this, the first failure raised, which took the entity unavailable *and* �
 
 - `TokenExpiredError` triggers `_async_attempt_reauth()`; only if that fails (or TFA is required) does the coordinator raise `ConfigEntryAuthFailed` and hand off to the reauth flow.
 - `InvalidAuthError`, and `ApiError` with status 401/403, raise `ConfigEntryAuthFailed` directly.
+- **`_async_attempt_reauth()` returns a `ReauthOutcome`, not a bool.** `ConfigEntryAuthFailed` bypasses `STALE_DATA_GRACE`, so raising it empties every entity at once and demands a two-factor round trip. That is right for `InvalidCredentialsError`/`TFARequiredError` (`NEEDS_USER`) and wrong for `CannotConnectError` (`UNREACHABLE`), which `_async_handle_token_expiry` turns into `UpdateFailed` so the grace window absorbs it. The refresh token expires about once a day, so before this any WAN outage spanning one cycle ended with the integration demanding credentials that were never the problem. An unexpected exception is `UNREACHABLE` too: it says nothing about the credentials, and waiting out the grace window is the cheaper way to be wrong.
 - Gigya cookies are stored so reauth can often skip TFA.
 - **A daily reauth is normal, not a fault.** `ACCESS_TOKEN_EXPIRY_MINUTES` is 30 in `dompower` and the per-day cache skips whole cycles, so the tokens usually go a full day untouched; the refresh token has expired by the time the next real fetch comes round, and `_async_attempt_reauth()` logs in again. One `Refresh token expired, attempting auto-reauth` per day followed by `Successfully re-authenticated` is the healthy pattern.
 
@@ -128,6 +151,8 @@ uv pip install -e ../dompower
 
 ### Services
 
+`dominion_energy.rebuild_cost_statistics` recomputes recorded cost history from the meter's own interval data, over the window the API still serves. It is where both the `cost_anomaly` repair flow and the service land, and it exists because the alternative — Developer Tools → Statistics, or a `recorder/adjust_sum_statistics` WebSocket call — is well past what most people installing a HACS integration will attempt. Consumption is left alone; only the pricing built on top of it is recalculated.
+
 `dominion_energy.import_green_button` (see `services.yaml`) imports Green Button XML as statistics history, extending the Energy Dashboard past the API's ~68 day ceiling to roughly 13 months. It writes into the same statistic IDs and recomputes the whole cumulative sum chain, so the series stays continuous. Adding a service means adding its strings to **both** `strings.json` and `translations/en.json` under `services:`.
 
 ## Development Notes
@@ -146,15 +171,15 @@ uv pip install -e ../dompower
 `pytest` (see `[tool.pytest.ini_options]` in `pyproject.toml`); run with `python3 -m pytest tests/ -q`. Tests are plain stdlib pytest and deliberately avoid importing `homeassistant`, so they run without a HA checkout.
 
 - `tests/test_rates.py` — Schedule 1 tariff math and the effective-dated schedule registry. The engine tests pin `get_schedule_for_date(date(2026, 1, 1))` on purpose: their expected values come from that worksheet, so they are regression tests of the calculation, not of current rates.
-- `tests/test_usage.py` — the pure helpers in `usage.py`, including the DST and billing-period regressions.
-- `tests/test_features.py` — projection maths, rate-drift comparison, generation aggregation, statistic-ID resolution, and the transient-failure policy. That last part is tested three ways: the pure helpers (`describe_api_error`, `stale_data_is_serviceable`) directly, the handler list by parsing `_async_update_data`, and the update cycle itself by borrowing `_async_update_data` and `_serve_last_good_data` off the real class onto `_StandInCoordinator` — a plain object with a `data` attribute, a failure counter and a scripted `_async_fetch_data`, which is all those two methods touch. They are driven with `asyncio.run()` from synchronous tests because the fast gate has no asyncio plugin, where an `async def test_` is skipped rather than failed.
+- `tests/test_usage.py` — the pure helpers in `usage.py`, including the DST and billing-period regressions, and `find_cost_anomalies()` against the real August 2026 day totals.
+- `tests/test_features.py` — projection maths, rate-drift comparison, generation aggregation, statistic-ID resolution, and the transient-failure policy. That last part is tested three ways: the pure helpers (`describe_api_error`, `stale_data_is_serviceable`) directly, the handler list by parsing `_async_update_data`, and the update cycle itself by borrowing `_async_update_data` and `_serve_last_good_data` off the real class onto `_StandInCoordinator` — a plain object with a `data` attribute, a failure counter and a scripted `_async_fetch_data`, which is all those two methods touch. They are driven with `asyncio.run()` from synchronous tests because the fast gate has no asyncio plugin, where an `async def test_` is skipped rather than failed. The same borrowing trick covers `_async_handle_token_expiry` (`_StandInExpiry`), which is how the connectivity-versus-rejection distinction is tested without a Gigya endpoint. The chain-seeding rule is asserted on the source, since `_update_statistics` needs a live recorder to run.
 - `tests/test_sensor.py` — translation-key coverage in both directions, entity naming, device/state class legality, and the conditional-group gating.
 - `tests/test_binary_sensor.py` — the same contract for the binary sensor platform, plus that "off" and "unknown" stay distinguishable.
 - `tests/test_entity.py` — the unique-ID and device-identifier schemes, and that no platform reimplements either. Treat this the way `test_diagnostics.py` is treated: a regression here silently discards every user's recorded history.
 - `tests/test_insights.py` — the derived metrics. Loads `insights.py` and `usage.py` into a private synthetic package so their relative imports resolve without executing the integration's `__init__.py`.
 - `tests/astkit.py` — not a test module; the shared `ast` plumbing the source-inspecting tests use.
 - `tests/test_diagnostics.py` — redaction. Treat this as security-relevant: it asserts no fake credential appears anywhere in the output.
-- `tests/test_translations.py` — `translations/en.json` exists, matches `strings.json`, and covers every step, error, and abort reason parsed out of `config_flow.py`.
+- `tests/test_translations.py` — `translations/en.json` exists, matches `strings.json`, and covers every step, error, and abort reason parsed out of `config_flow.py`, plus every service registered in `__init__.py` (name, description, `services.yaml` block, per-field strings) and every `translation_key` passed to `async_create_issue` (title, description, and a `fix_flow` step for the fixable ones).
 - `tests/test_green_button.py` — ESPI parsing and the timestamp realignment. Fixtures are generated in-process and reproduce Dominion's fixed-offset defect deliberately; a real export embeds an account number and a full hourly record of household occupancy and **must never enter the repository** (`.gitignore` covers `GreenButton*.xml`).
 
 Two CI test jobs: `test` (Python 3.12/3.13, `dev` extra only) enforces that the suite stays runnable without Home Assistant, and `test-ha` (Python 3.14, `test-ha` extra) runs it against the pinned HA release. `pytest-homeassistant-custom-component` pins one exact HA version and needs Python >= 3.14.2, which is why it is an optional extra rather than a base dependency. Keep new tests importable without `homeassistant` — files that need it follow the loader pattern in `test_diagnostics.py`.

@@ -27,6 +27,7 @@ _LOGGER = logging.getLogger(__name__)
 PLATFORMS: list[Platform] = [Platform.BINARY_SENSOR, Platform.SENSOR]
 
 SERVICE_IMPORT_GREEN_BUTTON = "import_green_button"
+SERVICE_REBUILD_COST_STATISTICS = "rebuild_cost_statistics"
 ATTR_CONFIG_ENTRY_ID = "config_entry_id"
 ATTR_FILE_PATH = "file_path"
 ATTR_DRY_RUN = "dry_run"
@@ -37,6 +38,10 @@ IMPORT_GREEN_BUTTON_SCHEMA = vol.Schema(
         vol.Required(ATTR_FILE_PATH): vol.All(cv.ensure_list, [cv.string]),
         vol.Optional(ATTR_DRY_RUN, default=False): cv.boolean,
     }
+)
+
+REBUILD_COST_STATISTICS_SCHEMA = vol.Schema(
+    {vol.Required(ATTR_CONFIG_ENTRY_ID): cv.string}
 )
 
 
@@ -59,8 +64,8 @@ def _async_register_services(hass: HomeAssistant) -> None:
     if hass.services.has_service(DOMAIN, SERVICE_IMPORT_GREEN_BUTTON):
         return
 
-    async def _async_import_green_button(call: ServiceCall) -> ServiceResponse:
-        """Import Green Button XML exports as statistics history."""
+    def _loaded_entry(call: ServiceCall) -> DominionEnergyConfigEntry:
+        """Resolve the targeted entry, or say why it cannot be used."""
         entry_id: str = call.data[ATTR_CONFIG_ENTRY_ID]
         entry = hass.config_entries.async_get_entry(entry_id)
         if entry is None or entry.domain != DOMAIN:
@@ -72,6 +77,11 @@ def _async_register_services(hass: HomeAssistant) -> None:
                 f"Config entry {entry.title} is not loaded; "
                 "reload the integration and try again"
             )
+        return entry
+
+    async def _async_import_green_button(call: ServiceCall) -> ServiceResponse:
+        """Import Green Button XML exports as statistics history."""
+        entry = _loaded_entry(call)
 
         paths: list[str] = call.data[ATTR_FILE_PATH]
         for path in paths:
@@ -111,12 +121,31 @@ def _async_register_services(hass: HomeAssistant) -> None:
             ) from err
         return summary
 
+    async def _async_rebuild_cost_statistics(call: ServiceCall) -> None:
+        """Recompute recorded cost history from the meter's own interval data.
+
+        The way out of a cost statistic that has gone wrong -- a duplicated
+        day, a chain seeded from the wrong row by an older version -- without
+        anyone needing Developer Tools or a WebSocket client. Consumption is
+        left alone: it is the record of what the meter measured, and only the
+        pricing built on top of it is being recomputed.
+        """
+        entry = _loaded_entry(call)
+        coordinator: DominionEnergyCoordinator = entry.runtime_data
+        await coordinator.async_rebuild_cost_statistics()
+
     hass.services.async_register(
         DOMAIN,
         SERVICE_IMPORT_GREEN_BUTTON,
         _async_import_green_button,
         schema=IMPORT_GREEN_BUTTON_SCHEMA,
         supports_response=SupportsResponse.OPTIONAL,
+    )
+    hass.services.async_register(
+        DOMAIN,
+        SERVICE_REBUILD_COST_STATISTICS,
+        _async_rebuild_cost_statistics,
+        schema=REBUILD_COST_STATISTICS_SCHEMA,
     )
 
 

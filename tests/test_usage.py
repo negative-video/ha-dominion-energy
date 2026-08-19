@@ -24,8 +24,10 @@ from rates import (  # noqa: E402
     calculate_schedule1_period_bill,
 )
 from usage import (  # noqa: E402
+    COST_ANOMALY_TOLERANCE,
     DEFAULT_BILLING_PERIOD_DAYS,
     MIN_BILLING_PERIOD_DAYS,
+    MIN_COST_ANOMALY_DAYS,
     aggregate_hourly,
     billing_period_days,
     billing_period_end,
@@ -34,6 +36,7 @@ from usage import (  # noqa: E402
     day_looks_complete,
     deduplicate_hourly_by_utc,
     filter_incomplete_days,
+    find_cost_anomalies,
     shift_months,
 )
 
@@ -710,3 +713,66 @@ class TestTierBoundaryFollowsBillingPeriod:
         # Summer over-800 rates are net higher than the under-800 rates, so
         # correctly crossing the boundary costs more than a spurious reset.
         assert by_period > by_calendar_month
+
+
+# The fortnight around the incident, as the Energy Dashboard showed it: day
+# totals differenced out of the cumulative sums. 15 August carries a second
+# copy of its own cost and nothing else about it is wrong.
+AUGUST = [
+    (date(2026, 8, 6), 76.03, 14.03),
+    (date(2026, 8, 7), 84.33, 15.53),
+    (date(2026, 8, 8), 87.44, 16.10),
+    (date(2026, 8, 9), 83.25, 15.34),
+    (date(2026, 8, 10), 79.28, 14.62),
+    (date(2026, 8, 11), 64.81, 12.00),
+    (date(2026, 8, 12), 74.83, 13.81),
+    (date(2026, 8, 13), 83.89, 15.45),
+    (date(2026, 8, 14), 78.05, 14.40),
+    (date(2026, 8, 15), 90.25, 32.95),
+    (date(2026, 8, 16), 84.67, 15.35),
+    (date(2026, 8, 17), 79.91, 14.50),
+    (date(2026, 8, 18), 73.40, 13.34),
+]
+
+HEALTHY = [(day, kwh, cost) for day, kwh, cost in AUGUST if day != date(2026, 8, 15)]
+
+
+class TestFindCostAnomalies:
+    """The catch that should have spoken up on 16 August."""
+
+    def test_it_finds_the_duplicated_day(self) -> None:
+        found = find_cost_anomalies(AUGUST)
+        assert [anomaly.day for anomaly in found] == [date(2026, 8, 15)]
+
+    def test_it_reports_how_far_off_the_day_is(self) -> None:
+        (anomaly,) = find_cost_anomalies(AUGUST)
+        assert anomaly.ratio == pytest.approx(1.98, abs=0.01)
+        assert anomaly.rate == pytest.approx(0.365, abs=0.001)
+        assert anomaly.baseline_rate == pytest.approx(0.1843, abs=0.0005)
+
+    def test_real_tariff_movement_is_not_an_anomaly(self) -> None:
+        """Sixty days of Schedule 1 spanned a factor of 1.06. None of it counts."""
+        assert find_cost_anomalies(HEALTHY) == []
+
+    def test_a_halved_day_is_caught_too(self) -> None:
+        """A seed that was too low reads as a bargain, and is just as wrong."""
+        halved = [
+            (day, kwh, cost / 3 if day == date(2026, 8, 12) else cost)
+            for day, kwh, cost in HEALTHY
+        ]
+        assert [a.day for a in find_cost_anomalies(halved)] == [date(2026, 8, 12)]
+
+    def test_a_fresh_install_accuses_nobody(self) -> None:
+        assert find_cost_anomalies(AUGUST[: MIN_COST_ANOMALY_DAYS - 1]) == []
+
+    def test_an_almost_empty_day_is_not_evidence(self) -> None:
+        """Rounding on a 0.2 kWh day says nothing about the tariff."""
+        quiet = [*HEALTHY, (date(2026, 8, 19), 0.2, 0.9)]
+        assert find_cost_anomalies(quiet) == []
+
+    def test_the_tolerance_leaves_room_on_both_sides(self) -> None:
+        """Below a doubling, above real tariff movement."""
+        assert 1.06 < COST_ANOMALY_TOLERANCE < 1.8
+
+    def test_it_survives_a_day_with_no_cost(self) -> None:
+        assert find_cost_anomalies([*HEALTHY, (date(2026, 8, 19), 50.0, 0.0)]) == []

@@ -12,6 +12,7 @@ from calendar import monthrange
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
+from statistics import median
 from typing import Protocol, overload
 
 # Fallback billing period length when the bill forecast is unavailable.
@@ -318,3 +319,74 @@ def build_cumulative_statistics(
         running += value
         rows.append(CumulativeStatistic(start=utc_dt, state=value, sum=running))
     return rows
+
+
+# A day's cost divided by its own usage should sit close to every other day's.
+# The tariffs this integration supports move by a few percent across a billing
+# period, never by a multiple: sixty days of Schedule 1 on a real meter spanned
+# 0.174 to 0.185 $/kWh, a factor of 1.06. A day counted twice, on the other
+# hand, doubles that day's cost while leaving its kWh alone, so it lands at
+# almost exactly twice the surrounding rate -- 2.01x in the one case seen in
+# the wild. The threshold sits well below that and well above real movement.
+COST_ANOMALY_TOLERANCE = 1.5
+
+# Fewer days than this and the median is not a baseline worth accusing a day
+# against; a fresh install is not evidence of anything.
+MIN_COST_ANOMALY_DAYS = 7
+
+# Dividing a cost by a nearly-empty day measures rounding, not the tariff.
+MIN_COST_ANOMALY_KWH = 1.0
+
+
+@dataclass(frozen=True)
+class CostAnomaly:
+    """A day whose recorded cost is out of character for its own usage."""
+
+    day: date
+    kwh: float
+    cost: float
+    rate: float
+    baseline_rate: float
+
+    @property
+    def ratio(self) -> float:
+        """How far the day sits from the baseline, as a multiple."""
+        return self.rate / self.baseline_rate
+
+
+def find_cost_anomalies(
+    daily: Iterable[tuple[date, float, float]],
+    *,
+    tolerance: float = COST_ANOMALY_TOLERANCE,
+    minimum_days: int = MIN_COST_ANOMALY_DAYS,
+    minimum_kwh: float = MIN_COST_ANOMALY_KWH,
+) -> list[CostAnomaly]:
+    """Find days priced far away from the median day beside them.
+
+    Takes `(day, kwh, cost)` as the Energy Dashboard would show them -- day
+    totals, already differenced out of the cumulative sums -- and returns the
+    days whose implied rate is off the median by more than `tolerance` in
+    either direction.
+
+    Both directions are checked on purpose. A duplicated cost lands high; a
+    duplicated *consumption* day, or a cost window that was rewritten from a
+    seed that was too low, lands low. Neither is a billing fact, and a user
+    looking at either one has no way to tell that from the dashboard.
+    """
+    priced = [
+        (day, kwh, cost, cost / kwh)
+        for day, kwh, cost in daily
+        if kwh >= minimum_kwh and cost > 0
+    ]
+    if len(priced) < minimum_days:
+        return []
+
+    baseline = median(rate for *_, rate in priced)
+    if baseline <= 0:
+        return []
+
+    return [
+        CostAnomaly(day=day, kwh=kwh, cost=cost, rate=rate, baseline_rate=baseline)
+        for day, kwh, cost, rate in priced
+        if rate > baseline * tolerance or rate * tolerance < baseline
+    ]

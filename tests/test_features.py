@@ -77,6 +77,14 @@ def _placeholder_modules() -> dict[str, types.ModuleType]:
     def _unused(*_args: Any, **_kwargs: Any) -> Any:
         raise AssertionError("placeholder Home Assistant API called in a unit test")
 
+    def _issue_registry() -> types.ModuleType:
+        """Stand-in for the repairs issue registry, imported as ``ir``."""
+        module = types.ModuleType("homeassistant.helpers.issue_registry")
+        module.async_create_issue = _unused  # type: ignore[attr-defined]
+        module.async_delete_issue = _unused  # type: ignore[attr-defined]
+        module.IssueSeverity = _Sentinel  # type: ignore[attr-defined]
+        return module
+
     contents: dict[str, dict[str, Any]] = {
         "dompower": {
             name: type(name, (Exception,), {})
@@ -109,6 +117,7 @@ def _placeholder_modules() -> dict[str, types.ModuleType]:
         "homeassistant.components.recorder.statistics": {
             "async_add_external_statistics": _unused,
             "get_last_statistics": _unused,
+            "statistics_during_period": _unused,
         },
         "homeassistant.config_entries": {"ConfigEntry": _Coordinator},
         "homeassistant.const": {"UnitOfEnergy": _Sentinel},
@@ -117,7 +126,7 @@ def _placeholder_modules() -> dict[str, types.ModuleType]:
             "ConfigEntryAuthFailed": type("ConfigEntryAuthFailed", (Exception,), {}),
             "HomeAssistantError": type("HomeAssistantError", (Exception,), {}),
         },
-        "homeassistant.helpers": {},
+        "homeassistant.helpers": {"issue_registry": _issue_registry()},
         "homeassistant.helpers.aiohttp_client": {"async_get_clientsession": _unused},
         "homeassistant.helpers.update_coordinator": {
             "DataUpdateCoordinator": _Coordinator,
@@ -194,6 +203,8 @@ DominionEnergyCoordinator = coordinator.DominionEnergyCoordinator
 # the same class the code under test raises.
 UpdateFailed = coordinator.UpdateFailed
 ConfigEntryAuthFailed = coordinator.ConfigEntryAuthFailed
+ReauthOutcome = coordinator.ReauthOutcome
+TokenExpiredError = coordinator.TokenExpiredError
 # Bound staticmethods are callable straight off the class, so the breakdown
 # helper can be exercised without building a coordinator (which needs `hass`).
 projected_bill = coordinator.DominionEnergyCoordinator._projected_bill
@@ -1306,25 +1317,30 @@ class TestHvacHistoryIsReadWholesale:
         assert 'attributes.get("hvac_action")' in source
 
 
-class TestCostChainIsSeededFromTheRewriteWindow:
-    """The cost chain must continue from the window, never from its own end.
+class TestEveryChainIsSeededFromTheRewriteWindow:
+    """A statistics chain must continue from the window, never from its own end.
 
-    Consumption and cost are written by two separate
-    `async_add_external_statistics` calls and read back by two separate
-    queries, so an interrupted cycle -- or one that re-runs after a reload
-    following an outage -- can leave the cost chain ending a day later than
-    consumption. `_update_statistics` picks the window to rewrite from the
-    consumption stream; seeding cost from wherever the *cost* stream happened
-    to end then adds the overlapping day on top of a sum that already contains
-    it.
+    Consumption, cost and generation are written by separate
+    `async_add_external_statistics` calls and read back by separate queries, so
+    a cycle that is interrupted -- by an unclean shutdown between two writes, or
+    by a reload landing on a recovery cycle after an outage -- can leave one
+    chain ending a day later than another. `_update_statistics` picks the window
+    to rewrite from the consumption stream; seeding a chain from wherever *that*
+    chain happened to end then adds the overlapping day on top of a sum which
+    already contains it.
 
     The damage is invisible in the hourly rows -- every one of them stays
     individually correct -- because the whole duplicate lands in the cumulative
-    sum at the first hour of the window. The Energy Dashboard reads a day's
-    cost as the difference between cumulative sums, so it shows that one day at
-    roughly double and every later day unaffected. Seen once in the wild on
+    sum at the first hour of the window. The Energy Dashboard reads a day's cost
+    as the difference between cumulative sums, so it shows that one day at
+    roughly double and every later day unaffected. Seen in the wild on
     2026-08-15: 90.25 kWh billed at $32.95 instead of $16.34, the day the API
     came back from an eight-hour outage.
+
+    Seeding from `start_date` also cannot land mid-day, which is the other half
+    of the guarantee: a seed taken from "the last row that proves the day
+    complete" is the 22:00 row on a day whose 23:00 row was written as a stale
+    zero, and 23:00 then falls out of the running total.
     """
 
     @staticmethod
@@ -1341,19 +1357,21 @@ class TestCostChainIsSeededFromTheRewriteWindow:
         args = [arg.arg for arg in self._update_statistics().args.args]
         assert "last_cost_stat" not in args, args
 
-    def test_cost_sum_is_only_zero_or_a_lookup_before_the_window(self) -> None:
-        assigned = [
-            ast.unparse(node.value)
-            for node in ast.walk(self._update_statistics())
-            if isinstance(node, ast.Assign)
-            for target in node.targets
-            if isinstance(target, ast.Name) and target.id == "cost_sum"
-        ]
-        assert assigned, "cost_sum is never assigned"
-        for source in assigned:
-            assert source == "0.0" or "_get_sum_before" in source, source
+    def test_every_chain_is_seeded_the_same_way(self) -> None:
+        seeded = {
+            target.id: ast.unparse(assign.value)
+            for assign in ast.walk(self._update_statistics())
+            if isinstance(assign, ast.Assign)
+            for target in assign.targets
+            if isinstance(target, ast.Name) and target.id.endswith("_sum")
+        }
+        assert seeded == {
+            "consumption_sum": "await seed(consumption_stat_id)",
+            "cost_sum": "await seed(cost_stat_id)",
+            "generation_sum": "await seed(generation_stat_id)",
+        }, seeded
 
-    def test_both_derived_chains_start_from_the_same_window(self) -> None:
+    def test_the_seed_reads_the_row_before_the_window(self) -> None:
         node = self._update_statistics()
         windows = [
             ast.unparse(assign.value)
@@ -1365,12 +1383,134 @@ class TestCostChainIsSeededFromTheRewriteWindow:
         assert len(windows) == 1, windows
         assert "start_date" in windows[0], windows[0]
 
-        seeded = {
-            ast.unparse(call.args[0]): ast.unparse(call.args[1])
+        lookups = [
+            ast.unparse(call)
             for call in ast.walk(node)
             if isinstance(call, ast.Call)
             and ast.unparse(call.func).endswith("_get_sum_before")
-            and len(call.args) >= 2
-        }
-        assert seeded.get("cost_stat_id") == "window_start_utc", seeded
-        assert seeded.get("generation_stat_id") == "window_start_utc", seeded
+        ]
+        assert len(lookups) == 1, lookups
+        assert "window_start_utc" in lookups[0], lookups[0]
+
+    def test_a_rebuilt_window_restarts_every_chain_together(self) -> None:
+        """`reset_chains` is the one branch that may seed from nothing."""
+        seed = next(
+            n
+            for n in ast.walk(self._update_statistics())
+            if isinstance(n, ast.AsyncFunctionDef) and n.name == "seed"
+        )
+        assert "reset_chains" in ast.unparse(seed), ast.unparse(seed)
+
+
+class _StandInExpiry:
+    """`_async_handle_token_expiry` on an object Home Assistant never built.
+
+    The method reads `self._async_attempt_reauth` and `self._async_fetch_data`
+    and nothing else, so borrowing it off the real class runs the shipped
+    branch rather than a paraphrase of it.
+    """
+
+    _async_handle_token_expiry = (
+        DominionEnergyCoordinator._async_handle_token_expiry  # noqa: SLF001
+    )
+
+    def __init__(self, outcome: Any, fetched: Any = "fresh data") -> None:
+        self._outcome = outcome
+        self._fetched = fetched
+        self.attempts = 0
+
+    async def _async_attempt_reauth(self) -> Any:
+        self.attempts += 1
+        return self._outcome
+
+    async def _async_fetch_data(self, *, allow_reauth: bool) -> Any:
+        assert allow_reauth is False, "the retry must not be allowed to recurse"
+        return self._fetched
+
+
+class TestAnUnreachableLoginIsNotABadPassword:
+    """A dead WAN must not be reported as credentials needing attention.
+
+    `ConfigEntryAuthFailed` is deliberately not absorbed by `STALE_DATA_GRACE`,
+    so raising it takes every entity unavailable at once and puts a
+    "Reauthenticate" prompt in front of the user. That is right for a password
+    the utility no longer accepts. It is wrong for a router that is rebooting
+    -- and the refresh token expires about once a day, so any outage long
+    enough to span one cycle used to end that way: a two-factor round trip
+    demanded for a problem two-factor could not fix.
+    """
+
+    @staticmethod
+    def _expire(outcome: Any) -> Any:
+        stand_in = _StandInExpiry(outcome)
+        return stand_in, TokenExpiredError("refresh token expired")
+
+    def test_a_successful_reauth_returns_the_retry(self) -> None:
+        stand_in, err = self._expire(ReauthOutcome.SUCCEEDED)
+        result = asyncio.run(
+            stand_in._async_handle_token_expiry(err, allow_reauth=True)  # noqa: SLF001
+        )
+        assert result == "fresh data"
+        assert stand_in.attempts == 1
+
+    def test_an_unreachable_endpoint_is_a_transient_failure(self) -> None:
+        stand_in, err = self._expire(ReauthOutcome.UNREACHABLE)
+        with pytest.raises(UpdateFailed):
+            asyncio.run(
+                stand_in._async_handle_token_expiry(  # noqa: SLF001
+                    err, allow_reauth=True
+                )
+            )
+
+    def test_a_rejected_login_still_asks_the_user(self) -> None:
+        stand_in, err = self._expire(ReauthOutcome.NEEDS_USER)
+        with pytest.raises(ConfigEntryAuthFailed):
+            asyncio.run(
+                stand_in._async_handle_token_expiry(  # noqa: SLF001
+                    err, allow_reauth=True
+                )
+            )
+
+    def test_the_retry_does_not_get_a_second_reauth(self) -> None:
+        """A token that expires again immediately is not a login problem."""
+        stand_in, err = self._expire(ReauthOutcome.SUCCEEDED)
+        with pytest.raises(ConfigEntryAuthFailed):
+            asyncio.run(
+                stand_in._async_handle_token_expiry(  # noqa: SLF001
+                    err, allow_reauth=False
+                )
+            )
+        assert stand_in.attempts == 0
+
+    def test_connectivity_and_rejection_are_distinct_outcomes(self) -> None:
+        assert ReauthOutcome.UNREACHABLE is not ReauthOutcome.NEEDS_USER
+
+    def test_reauth_reports_an_outcome_not_a_flag(self) -> None:
+        """A bool cannot carry the distinction, so the signature must not be one."""
+        source = ast.unparse(
+            next(
+                n
+                for n in ast.walk(
+                    ast.parse((COMPONENT_DIR / "coordinator.py").read_text())
+                )
+                if isinstance(n, ast.AsyncFunctionDef)
+                and n.name == "_async_attempt_reauth"
+            )
+        )
+        assert "return True" not in source
+        assert "return False" not in source
+
+    def test_an_unexpected_failure_is_treated_as_transient(self) -> None:
+        """It says nothing about the credentials, so it must not accuse them."""
+        source = ast.unparse(
+            next(
+                n
+                for n in ast.walk(
+                    ast.parse((COMPONENT_DIR / "coordinator.py").read_text())
+                )
+                if isinstance(n, ast.AsyncFunctionDef)
+                and n.name == "_async_attempt_reauth"
+            )
+        )
+        broad = source.split("except Exception")[1]
+        assert "UNREACHABLE" in broad, broad

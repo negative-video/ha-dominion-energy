@@ -283,9 +283,27 @@ If that fails (for example, Dominion asks for a new verification code):
 - Tokens may have expired after extended inactivity
 - Use the re-authentication flow to log in again
 
+A prompt to reauthenticate means the login server answered and rejected the attempt. An internet outage that happens to span a token refresh is reported as a normal connection failure instead, and rides it out: the sensors keep serving the last published day for up to 24 hours rather than emptying, since the API only publishes one new day per day anyway. `Last successful update` is the sensor that stops advancing when polls are actually failing.
+
 ### Missing data
 - Data may take up to an hour to appear after setup
 - Historical data availability depends on Dominion Energy's API
+
+### One day costs about twice what it should
+
+**This is not a billing error and there is nothing to raise with Dominion Energy.** Your bill is calculated by the utility from the meter; nothing here changes it, and the utility cannot see these numbers at all.
+
+What you are looking at is how this integration stores history. The Energy Dashboard reads a day's cost as the difference between two running totals, so if an update is interrupted part way through -- an outage, a power cut, a restart landing mid-write -- one day can end up carrying a second copy of its own cost while every underlying hourly figure stays correct. The usage in kWh is unaffected.
+
+The integration checks for this after each update and raises a repair under **Settings → System → Repairs** when it finds one; the fix button recomputes the recorded cost history. To do it by hand, or for a day older than the check looks back:
+
+```yaml
+action: dominion_energy.rebuild_cost_statistics
+data:
+  config_entry_id: <your entry>
+```
+
+Usage history is left untouched -- only the pricing built on top of it is recalculated -- and nothing is sent to Dominion Energy.
 
 ### Reporting a problem
 

@@ -15,3 +15,10 @@ import_green_button:
       default: false
       selector:
         boolean:
+rebuild_cost_statistics:
+  fields:
+    config_entry_id:
+      required: true
+      selector:
+        config_entry:
+          integration: dominion_energy

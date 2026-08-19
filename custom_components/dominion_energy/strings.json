@@ -269,6 +269,30 @@
           "description": "Report what would be imported without writing any statistics. Use this first to check the date range and the timestamp alignment result."
         }
       }
+    },
+    "rebuild_cost_statistics": {
+      "name": "Rebuild cost statistics",
+      "description": "Recomputes the recorded cost history for this meter from its own interval data. Use this if the Energy Dashboard shows a day priced unlike the days around it - a cost spike of that kind is an artifact of how history is stored here, not a charge from Dominion Energy, and your bill is unaffected. Usage history is left untouched; only the pricing built on top of it is recalculated.",
+      "fields": {
+        "config_entry_id": {
+          "name": "Account",
+          "description": "The Dominion Energy account and meter to rebuild."
+        }
+      }
+    }
+  },
+  "issues": {
+    "cost_anomaly": {
+      "title": "Recorded cost for {day} looks wrong",
+      "description": "The Energy Dashboard has {day} at ${cost} for {kwh} kWh, which works out at ${rate} per kWh against ${baseline} on the days around it.\n\nThis is an artifact of how this integration stores history, not a charge from Dominion Energy. Your bill is not affected and there is nothing to query with the utility. It usually follows an interrupted update - an outage, a power cut, or a restart landing mid-write.\n\nRepairing this recomputes the recorded cost history from your own interval data. Your usage history is left untouched.",
+      "fix_flow": {
+        "step": {
+          "confirm": {
+            "title": "Rebuild recorded cost history",
+            "description": "This recomputes cost for every day the API can still reach, so {day} joins up with the days around it. Usage history is left untouched, and nothing is sent to Dominion Energy.\n\nDays flagged: {days}."
+          }
+        }
+      }
     }
   }
 }

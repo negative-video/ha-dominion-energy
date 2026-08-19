@@ -289,3 +289,119 @@ def test_config_aborts_translated(path: Path, reason: str) -> None:
     """Every literal async_abort reason has a translated message."""
     aborts = _load_json(path)["config"]["abort"]
     assert reason in aborts, f"{path.name} is missing config.abort.{reason}"
+
+
+SERVICES_PATH = COMPONENT_DIR / "services.yaml"
+INIT_PATH = COMPONENT_DIR / "__init__.py"
+COORDINATOR_PATH = COMPONENT_DIR / "coordinator.py"
+
+
+def _registered_services() -> list[str]:
+    """Service names passed to `hass.services.async_register` in __init__.py."""
+    tree = ast.parse(INIT_PATH.read_text(encoding="utf-8"))
+    constants = {
+        target.id: node.value.value
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Assign) and isinstance(node.value, ast.Constant)
+        for target in node.targets
+        if isinstance(target, ast.Name)
+    }
+    names = []
+    for node in ast.walk(tree):
+        if (
+            isinstance(node, ast.Call)
+            and ast.unparse(node.func).endswith("services.async_register")
+            and len(node.args) >= 2
+        ):
+            service = node.args[1]
+            if isinstance(service, ast.Name) and service.id in constants:
+                names.append(str(constants[service.id]))
+            elif isinstance(service, ast.Constant):
+                names.append(str(service.value))
+    return names
+
+
+def _issue_translation_keys() -> list[str]:
+    """`translation_key=` given to every `async_create_issue` call."""
+    tree = ast.parse(COORDINATOR_PATH.read_text(encoding="utf-8"))
+    return [
+        keyword.value.value
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and ast.unparse(node.func).endswith("async_create_issue")
+        for keyword in node.keywords
+        if keyword.arg == "translation_key" and isinstance(keyword.value, ast.Constant)
+    ]
+
+
+REGISTERED_SERVICES = _registered_services()
+ISSUE_KEYS = _issue_translation_keys()
+
+
+def test_service_extraction_found_something() -> None:
+    assert REGISTERED_SERVICES
+    assert ISSUE_KEYS
+
+
+@pytest.mark.parametrize(
+    "path", [STRINGS_PATH, TRANSLATIONS_PATH], ids=lambda p: p.name
+)
+@pytest.mark.parametrize("service", REGISTERED_SERVICES)
+def test_registered_services_translated(path: Path, service: str) -> None:
+    """A registered service with no strings shows as a raw key in the UI."""
+    entry = _load_json(path).get("services", {}).get(service)
+    assert entry, f"{path.name} has no services.{service}"
+    assert entry.get("name"), f"services.{service} has no name"
+    assert entry.get("description"), f"services.{service} has no description"
+
+
+@pytest.mark.parametrize("service", REGISTERED_SERVICES)
+def test_registered_services_have_a_schema(service: str) -> None:
+    """services.yaml is what puts a service in the UI's service picker."""
+    schema = SERVICES_PATH.read_text(encoding="utf-8")
+    assert f"\n{service}:" in f"\n{schema}", f"services.yaml has no {service}"
+
+
+@pytest.mark.parametrize("service", REGISTERED_SERVICES)
+def test_service_fields_are_documented(service: str) -> None:
+    """Every field offered in services.yaml needs a name and a description."""
+    import re
+
+    block = re.search(
+        rf"^{service}:\n(?:[ \t].*\n|\n)*",
+        SERVICES_PATH.read_text(encoding="utf-8"),
+        re.M,
+    )
+    assert block, f"services.yaml has no {service} block"
+    fields = set(re.findall(r"^    (\w+):$", block.group(0), re.M))
+    documented = _load_json(STRINGS_PATH)["services"][service].get("fields", {})
+    assert fields <= set(documented), (
+        f"services.{service} is missing strings for {fields - set(documented)}"
+    )
+
+
+@pytest.mark.parametrize(
+    "path", [STRINGS_PATH, TRANSLATIONS_PATH], ids=lambda p: p.name
+)
+@pytest.mark.parametrize("issue", ISSUE_KEYS)
+def test_repair_issues_translated(path: Path, issue: str) -> None:
+    """A repair with no strings is a blank card the user cannot act on."""
+    entry = _load_json(path).get("issues", {}).get(issue)
+    assert entry, f"{path.name} has no issues.{issue}"
+    assert entry.get("title"), f"issues.{issue} has no title"
+    assert entry.get("description"), f"issues.{issue} has no description"
+
+
+@pytest.mark.parametrize("issue", ISSUE_KEYS)
+def test_fixable_issues_have_a_flow_and_its_strings(issue: str) -> None:
+    """`is_fixable=True` promises a repairs.py flow and a translated step."""
+    assert (COMPONENT_DIR / "repairs.py").is_file(), (
+        "a fixable issue without repairs.py leaves the Repair button dead"
+    )
+    steps = (
+        _load_json(STRINGS_PATH)["issues"][issue].get("fix_flow", {}).get("step", {})
+    )
+    assert steps, f"issues.{issue} is fixable but has no fix_flow steps"
+    for step_id, step in steps.items():
+        assert step.get("title"), f"issues.{issue} step {step_id} has no title"
+        assert step.get("description"), f"issues.{issue} step {step_id} lacks text"
