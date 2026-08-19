@@ -1304,3 +1304,73 @@ class TestHvacHistoryIsReadWholesale:
     def test_it_reads_hvac_action(self) -> None:
         source = self._source()
         assert 'attributes.get("hvac_action")' in source
+
+
+class TestCostChainIsSeededFromTheRewriteWindow:
+    """The cost chain must continue from the window, never from its own end.
+
+    Consumption and cost are written by two separate
+    `async_add_external_statistics` calls and read back by two separate
+    queries, so an interrupted cycle -- or one that re-runs after a reload
+    following an outage -- can leave the cost chain ending a day later than
+    consumption. `_update_statistics` picks the window to rewrite from the
+    consumption stream; seeding cost from wherever the *cost* stream happened
+    to end then adds the overlapping day on top of a sum that already contains
+    it.
+
+    The damage is invisible in the hourly rows -- every one of them stays
+    individually correct -- because the whole duplicate lands in the cumulative
+    sum at the first hour of the window. The Energy Dashboard reads a day's
+    cost as the difference between cumulative sums, so it shows that one day at
+    roughly double and every later day unaffected. Seen once in the wild on
+    2026-08-15: 90.25 kWh billed at $32.95 instead of $16.34, the day the API
+    came back from an eight-hour outage.
+    """
+
+    @staticmethod
+    def _update_statistics() -> ast.AsyncFunctionDef:
+        tree = ast.parse((COMPONENT_DIR / "coordinator.py").read_text())
+        return next(
+            n
+            for n in ast.walk(tree)
+            if isinstance(n, ast.AsyncFunctionDef) and n.name == "_update_statistics"
+        )
+
+    def test_the_last_cost_statistic_is_not_in_reach(self) -> None:
+        """Not a parameter, so the tempting wrong seed is not there to grab."""
+        args = [arg.arg for arg in self._update_statistics().args.args]
+        assert "last_cost_stat" not in args, args
+
+    def test_cost_sum_is_only_zero_or_a_lookup_before_the_window(self) -> None:
+        assigned = [
+            ast.unparse(node.value)
+            for node in ast.walk(self._update_statistics())
+            if isinstance(node, ast.Assign)
+            for target in node.targets
+            if isinstance(target, ast.Name) and target.id == "cost_sum"
+        ]
+        assert assigned, "cost_sum is never assigned"
+        for source in assigned:
+            assert source == "0.0" or "_get_sum_before" in source, source
+
+    def test_both_derived_chains_start_from_the_same_window(self) -> None:
+        node = self._update_statistics()
+        windows = [
+            ast.unparse(assign.value)
+            for assign in ast.walk(node)
+            if isinstance(assign, ast.Assign)
+            for target in assign.targets
+            if isinstance(target, ast.Name) and target.id == "window_start_utc"
+        ]
+        assert len(windows) == 1, windows
+        assert "start_date" in windows[0], windows[0]
+
+        seeded = {
+            ast.unparse(call.args[0]): ast.unparse(call.args[1])
+            for call in ast.walk(node)
+            if isinstance(call, ast.Call)
+            and ast.unparse(call.func).endswith("_get_sum_before")
+            and len(call.args) >= 2
+        }
+        assert seeded.get("cost_stat_id") == "window_start_utc", seeded
+        assert seeded.get("generation_stat_id") == "window_start_utc", seeded

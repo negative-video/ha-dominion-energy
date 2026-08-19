@@ -1740,7 +1740,6 @@ class DominionEnergyCoordinator(DataUpdateCoordinator[DominionEnergyData]):
             cost_stat_id,
             generation_stat_id if generation_exists else None,
             last_stat,
-            last_cost_stat,
             data_date,
             bill_forecast,
         )
@@ -1801,16 +1800,18 @@ class DominionEnergyCoordinator(DataUpdateCoordinator[DominionEnergyData]):
     async def _find_last_complete_day_stat(
         self,
         consumption_stat_id: str,
-        cost_stat_id: str,
-    ) -> tuple[date | None, float, float]:
+    ) -> tuple[date | None, float]:
         """Walk backwards to find the last stat from a fully-populated day.
 
         A fully-populated day has non-zero data extending to at least hour 22
         local time. Days with data only at hour 00:00 are artifacts from
         a previous buggy version and should be skipped.
 
-        Returns (date, consumption_sum, cost_sum) of the last stat from a
-        complete day, or (None, 0.0, 0.0) if none found.
+        Consumption only: the cost and generation chains are reseeded from the
+        rewrite window in `_update_statistics`, not paired to this row.
+
+        Returns (date, consumption_sum) of the last stat from a complete day,
+        or (None, 0.0) if none found.
         """
         local_tz = dt_util.get_default_time_zone()
 
@@ -1825,7 +1826,7 @@ class DominionEnergyCoordinator(DataUpdateCoordinator[DominionEnergyData]):
             {"state", "sum"},
         )
         if not last_stats.get(consumption_stat_id):
-            return None, 0.0, 0.0
+            return None, 0.0
 
         # Walk backwards to find the last stat with state > 0 at hour >= 22
         # (indicating the end of a fully-populated day, not a sparse artifact).
@@ -1848,28 +1849,9 @@ class DominionEnergyCoordinator(DataUpdateCoordinator[DominionEnergyData]):
                 continue
 
             consumption_sum = float(stat_data.get("sum") or 0)
+            return stat_local.date(), consumption_sum
 
-            # Get the matching cost sum
-            cost_sum = 0.0
-            last_cost_stats = await get_instance(self.hass).async_add_executor_job(
-                get_last_statistics,
-                self.hass,
-                num_stats,
-                cost_stat_id,
-                True,
-                {"sum"},
-            )
-            if last_cost_stats.get(cost_stat_id):
-                for cost_data in sorted(
-                    last_cost_stats[cost_stat_id], key=_stat_start_utc, reverse=True
-                ):
-                    if _stat_start_utc(cost_data) <= stat_dt:
-                        cost_sum = float(cost_data.get("sum") or 0)
-                        break
-
-            return stat_local.date(), consumption_sum, cost_sum
-
-        return None, 0.0, 0.0
+        return None, 0.0
 
     async def _backfill_statistics(
         self,
@@ -2018,7 +2000,6 @@ class DominionEnergyCoordinator(DataUpdateCoordinator[DominionEnergyData]):
         cost_stat_id: str,
         generation_stat_id: str | None,
         last_stat: dict,
-        last_cost_stat: dict,
         data_date: date,
         bill_forecast: BillForecast | None,
     ) -> bool:
@@ -2027,6 +2008,11 @@ class DominionEnergyCoordinator(DataUpdateCoordinator[DominionEnergyData]):
         The window to rewrite is decided from the consumption stream, which is
         the one with the self-healing rules; the cost and generation chains
         then continue from whatever they held immediately before that window.
+
+        Cost and generation are therefore reseeded from `start_date` once, below
+        the branches, and never from their own newest row. `last_cost_stat` is
+        deliberately not a parameter: seeding the cost chain from wherever that
+        chain happened to end is what let one day's cost be counted twice.
 
         Returns True when the statistics are up to date through data_date.
         """
@@ -2078,14 +2064,6 @@ class DominionEnergyCoordinator(DataUpdateCoordinator[DominionEnergyData]):
             )
             return False
 
-        # Get the last cost sum (default to 0 if cost stats don't exist yet)
-        cost_sum = 0.0
-        if last_cost_stat.get(cost_stat_id):
-            try:
-                cost_sum = float(last_cost_stat[cost_stat_id][0].get("sum") or 0)
-            except (KeyError, IndexError, TypeError, ValueError):
-                _LOGGER.debug("Could not get last cost sum, starting from 0")
-
         # Check if we need to fetch new data.
         # Also detect incomplete days: if the last stat is on data_date but
         # doesn't cover the full day (last local hour < 22), re-fetch that day
@@ -2096,6 +2074,9 @@ class DominionEnergyCoordinator(DataUpdateCoordinator[DominionEnergyData]):
         # If the last stat has state=0, walk backwards through recent stats
         # to find the last non-zero entry, then re-fetch from that point.
         last_state = float(last_stat_data.get("state") or 0)
+        # Set only where consumption restarts its chain at zero, so the cost and
+        # generation chains restart with it instead of continuing an older sum.
+        reset_chains = False
         if last_state == 0 and last_stat_date >= data_date:
             _LOGGER.info(
                 "Last statistic has state=0 at %s — scanning for last non-zero entry",
@@ -2104,10 +2085,7 @@ class DominionEnergyCoordinator(DataUpdateCoordinator[DominionEnergyData]):
             (
                 last_good_date,
                 last_good_sum,
-                last_good_cost_sum,
-            ) = await self._find_last_complete_day_stat(
-                consumption_stat_id, cost_stat_id
-            )
+            ) = await self._find_last_complete_day_stat(consumption_stat_id)
             if last_good_date is not None:
                 _LOGGER.info(
                     "Last non-zero statistic on %s (sum=%.3f). "
@@ -2119,7 +2097,6 @@ class DominionEnergyCoordinator(DataUpdateCoordinator[DominionEnergyData]):
                 )
                 start_date = last_good_date + timedelta(days=1)
                 consumption_sum = last_good_sum
-                cost_sum = last_good_cost_sum
             else:
                 # All stats are zero — re-fetch everything
                 _LOGGER.warning(
@@ -2128,7 +2105,7 @@ class DominionEnergyCoordinator(DataUpdateCoordinator[DominionEnergyData]):
                 )
                 start_date = dt_util.now().date() - timedelta(days=BACKFILL_DAYS)
                 consumption_sum = 0.0
-                cost_sum = 0.0
+                reset_chains = True
         elif last_stat_date > data_date:
             _LOGGER.debug(
                 "Statistics already up to date: last_stat_date=%s > data_date=%s",
@@ -2164,11 +2141,8 @@ class DominionEnergyCoordinator(DataUpdateCoordinator[DominionEnergyData]):
             consumption_sum_before = await self._get_sum_before(
                 consumption_stat_id, day_start_utc
             )
-            cost_sum_before = await self._get_sum_before(cost_stat_id, day_start_utc)
             if consumption_sum_before is not None:
                 consumption_sum = consumption_sum_before
-            if cost_sum_before is not None:
-                cost_sum = cost_sum_before
         else:
             # Fetch data from day after last stat to data_date
             start_date = last_stat_date + timedelta(days=1)
@@ -2195,17 +2169,42 @@ class DominionEnergyCoordinator(DataUpdateCoordinator[DominionEnergyData]):
             )
             return True
 
-        # The generation chain is continued from whatever the recorder holds
-        # immediately before the window being (re)written, whichever branch
-        # above picked that window. Doing it once here keeps generation in step
-        # with consumption without threading a fourth running total through
-        # every self-healing branch.
+        # The cost and generation chains are continued from whatever the
+        # recorder holds immediately before the window being (re)written,
+        # whichever branch above picked that window. Doing it once here keeps
+        # both in step with consumption without threading extra running totals
+        # through every self-healing branch.
+        #
+        # Deriving cost from `start_date` rather than from its own newest row is
+        # load-bearing, not tidiness. The two chains are written by separate
+        # `async_add_external_statistics` calls and are read back by separate
+        # queries, so a cycle that is interrupted -- or one that re-runs after a
+        # reload following an outage -- can leave cost ending a day later than
+        # consumption. Seeding from the cost chain's own end then adds the
+        # overlapping day on top of a sum that already contains it, and the
+        # whole duplicate lands in the first hour of the rewritten window: every
+        # hourly cost stays individually correct while the Energy Dashboard,
+        # which reads day totals as differences of cumulative sums, shows one
+        # day at roughly double. Observed once in the wild, 2026-08-15.
+        window_start_utc = dt_util.as_utc(dt_util.start_of_local_day(start_date))
+
+        cost_sum = 0.0
+        if not reset_chains:
+            cost_sum = (
+                await self._get_sum_before(
+                    cost_stat_id,
+                    window_start_utc,
+                    count=(BACKFILL_DAYS + 1) * 24,
+                )
+                or 0.0
+            )
+
         generation_sum = 0.0
-        if generation_stat_id:
+        if generation_stat_id and not reset_chains:
             generation_sum = (
                 await self._get_sum_before(
                     generation_stat_id,
-                    dt_util.as_utc(dt_util.start_of_local_day(start_date)),
+                    window_start_utc,
                     count=(BACKFILL_DAYS + 1) * 24,
                 )
                 or 0.0
