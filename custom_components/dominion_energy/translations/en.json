@@ -284,12 +284,11 @@
   "issues": {
     "cost_anomaly": {
       "title": "Recorded cost for {day} looks wrong",
-      "description": "The Energy Dashboard has {day} at ${cost} for {kwh} kWh, which works out at ${rate} per kWh against ${baseline} on the days around it.\n\nThis is an artifact of how this integration stores history, not a charge from Dominion Energy. Your bill is not affected and there is nothing to query with the utility. It usually follows an interrupted update - an outage, a power cut, or a restart landing mid-write.\n\nRepairing this recomputes the recorded cost history from your own interval data. Your usage history is left untouched.",
       "fix_flow": {
         "step": {
           "confirm": {
-            "title": "Rebuild recorded cost history",
-            "description": "This recomputes cost for every day the API can still reach, so {day} joins up with the days around it. Usage history is left untouched, and nothing is sent to Dominion Energy.\n\nDays flagged: {days}."
+            "title": "Recorded cost for {day} looks wrong",
+            "description": "The Energy Dashboard has {day} at ${cost} for {kwh} kWh, which works out at ${rate} per kWh against ${baseline} on the days around it.\n\nThis is an artifact of how this integration stores history, not a charge from Dominion Energy. Your bill is not affected and there is nothing to query with the utility. It usually follows an interrupted update - an outage, a power cut, or a restart landing mid-write.\n\nContinuing recomputes the recorded cost history from your own interval data, for every day the API can still reach, so {day} joins up with the days around it. Your usage history is left untouched and nothing is sent to Dominion Energy.\n\nDays flagged: {days}."
           }
         }
       }

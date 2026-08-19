@@ -321,26 +321,39 @@ def _registered_services() -> list[str]:
     return names
 
 
-def _issue_translation_keys() -> list[str]:
-    """`translation_key=` given to every `async_create_issue` call."""
+def _created_issues() -> list[tuple[str, bool]]:
+    """`(translation_key, is_fixable)` for every `async_create_issue` call."""
     tree = ast.parse(COORDINATOR_PATH.read_text(encoding="utf-8"))
-    return [
-        keyword.value.value
-        for node in ast.walk(tree)
-        if isinstance(node, ast.Call)
-        and ast.unparse(node.func).endswith("async_create_issue")
-        for keyword in node.keywords
-        if keyword.arg == "translation_key" and isinstance(keyword.value, ast.Constant)
-    ]
+    issues = []
+    for node in ast.walk(tree):
+        if not (
+            isinstance(node, ast.Call)
+            and ast.unparse(node.func).endswith("async_create_issue")
+        ):
+            continue
+        keywords = {
+            keyword.arg: keyword.value
+            for keyword in node.keywords
+            if keyword.arg is not None
+        }
+        key = keywords.get("translation_key")
+        if not isinstance(key, ast.Constant):
+            continue
+        fixable = keywords.get("is_fixable")
+        issues.append(
+            (str(key.value), isinstance(fixable, ast.Constant) and bool(fixable.value))
+        )
+    return issues
 
 
 REGISTERED_SERVICES = _registered_services()
-ISSUE_KEYS = _issue_translation_keys()
+CREATED_ISSUES = _created_issues()
+ISSUE_KEYS = [key for key, _fixable in CREATED_ISSUES]
 
 
 def test_service_extraction_found_something() -> None:
     assert REGISTERED_SERVICES
-    assert ISSUE_KEYS
+    assert CREATED_ISSUES
 
 
 @pytest.mark.parametrize(
@@ -384,23 +397,46 @@ def test_service_fields_are_documented(service: str) -> None:
     "path", [STRINGS_PATH, TRANSLATIONS_PATH], ids=lambda p: p.name
 )
 @pytest.mark.parametrize("issue", ISSUE_KEYS)
-def test_repair_issues_translated(path: Path, issue: str) -> None:
+def test_repair_issues_have_a_title(path: Path, issue: str) -> None:
     """A repair with no strings is a blank card the user cannot act on."""
     entry = _load_json(path).get("issues", {}).get(issue)
     assert entry, f"{path.name} has no issues.{issue}"
     assert entry.get("title"), f"issues.{issue} has no title"
-    assert entry.get("description"), f"issues.{issue} has no description"
 
 
+@pytest.mark.parametrize(
+    "path", [STRINGS_PATH, TRANSLATIONS_PATH], ids=lambda p: p.name
+)
 @pytest.mark.parametrize("issue", ISSUE_KEYS)
-def test_fixable_issues_have_a_flow_and_its_strings(issue: str) -> None:
+def test_issue_text_lives_in_exactly_one_place(path: Path, issue: str) -> None:
+    """hassfest puts `description` and `fix_flow` in one exclusion group.
+
+    A fixable issue carries its text in the flow's first step, not at the top
+    level; supplying both fails CI with "two or more values in the same group
+    of exclusion 'fixable'", and supplying neither leaves the card silent.
+    """
+    entry = _load_json(path)["issues"][issue]
+    assert ("description" in entry) != ("fix_flow" in entry), (
+        f"issues.{issue} must have exactly one of description/fix_flow"
+    )
+
+
+@pytest.mark.parametrize(
+    ("issue", "fixable"), CREATED_ISSUES, ids=[key for key, _ in CREATED_ISSUES]
+)
+def test_fixability_matches_the_strings(issue: str, fixable: bool) -> None:
     """`is_fixable=True` promises a repairs.py flow and a translated step."""
+    entry = _load_json(STRINGS_PATH)["issues"][issue]
+    if not fixable:
+        assert "fix_flow" not in entry, (
+            f"issues.{issue} offers a fix flow the coordinator never enables"
+        )
+        return
+
     assert (COMPONENT_DIR / "repairs.py").is_file(), (
         "a fixable issue without repairs.py leaves the Repair button dead"
     )
-    steps = (
-        _load_json(STRINGS_PATH)["issues"][issue].get("fix_flow", {}).get("step", {})
-    )
+    steps = entry.get("fix_flow", {}).get("step", {})
     assert steps, f"issues.{issue} is fixable but has no fix_flow steps"
     for step_id, step in steps.items():
         assert step.get("title"), f"issues.{issue} step {step_id} has no title"
