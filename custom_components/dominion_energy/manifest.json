@@ -4,11 +4,11 @@
   "codeowners": [],
   "config_flow": true,
   "dependencies": ["recorder", "repairs"],
-  "documentation": "https://github.com/YeomansIII/ha-dominion-energy",
+  "documentation": "https://github.com/negative-video/ha-dominion-energy",
   "iot_class": "cloud_polling",
-  "issue_tracker": "https://github.com/YeomansIII/ha-dominion-energy/issues",
+  "issue_tracker": "https://github.com/negative-video/ha-dominion-energy/issues",
   "requirements": [
     "https://github.com/negative-video/dompower/releases/download/v0.4.0/dompower-0.4.0-py3-none-any.whl#dompower==0.4.0"
   ],
-  "version": "1.5.8"
+  "version": "2.0.0"
 }

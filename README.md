@@ -5,10 +5,10 @@
 <h1 align="center">Dominion Energy for Home Assistant</h1>
 
 <p align="center">
-  <a href="https://github.com/YeomansIII/ha-dominion-energy/releases"><img src="https://img.shields.io/github/v/release/YeomansIII/ha-dominion-energy?style=flat-square" alt="GitHub Release"></a>
-  <a href="https://github.com/YeomansIII/ha-dominion-energy/blob/main/LICENSE"><img src="https://img.shields.io/github/license/YeomansIII/ha-dominion-energy?style=flat-square" alt="License"></a>
-  <a href="https://github.com/YeomansIII/ha-dominion-energy/issues"><img src="https://img.shields.io/github/issues/YeomansIII/ha-dominion-energy?style=flat-square" alt="Issues"></a>
-  <img src="https://img.shields.io/badge/Home%20Assistant-blue?style=flat-square&logo=homeassistant&logoColor=white" alt="Home Assistant">
+  <a href="https://github.com/negative-video/ha-dominion-energy/releases"><img src="https://img.shields.io/github/v/release/negative-video/ha-dominion-energy?style=flat-square" alt="GitHub Release"></a>
+  <a href="https://github.com/negative-video/ha-dominion-energy/blob/main/LICENSE"><img src="https://img.shields.io/github/license/negative-video/ha-dominion-energy?style=flat-square" alt="License"></a>
+  <a href="https://github.com/negative-video/ha-dominion-energy/issues"><img src="https://img.shields.io/github/issues/negative-video/ha-dominion-energy?style=flat-square" alt="Issues"></a>
+  <img src="https://img.shields.io/badge/Home%20Assistant-2025.11%2B-blue?style=flat-square&logo=homeassistant&logoColor=white" alt="Home Assistant 2025.11+">
   <a href="https://github.com/hacs/integration"><img src="https://img.shields.io/badge/HACS-Custom-orange?style=flat-square" alt="HACS"></a>
 </p>
 
@@ -17,6 +17,179 @@
 </p>
 
 ---
+
+> **A fork of [YeomansIII/ha-dominion-energy](https://github.com/YeomansIII/ha-dominion-energy), by Jason Yeomans.**
+> The original integration is his work — the config flow, the Schedule 1 tariff
+> model, the external-statistics approach and the cost modes this is still
+> built on. This fork adds reliability work, correctness fixes and new
+> capabilities on top of that foundation; see
+> [What this fork adds](#what-this-fork-adds).
+>
+> It installs the matching fork of the client library,
+> [negative-video/dompower](https://github.com/negative-video/dompower),
+> **not** the `dompower` package on PyPI.
+
+## What this fork adds
+
+52 commits ahead of upstream and none behind, against a source tree that grew
+from 2,469 lines to 7,534 and a test suite that grew from 18 tests in one file
+to 651 across twelve. Upstream's most recent commit is from March 2026.
+
+Everything below is a change in behaviour, not a refactor. Where a number
+appears it was measured against a real meter or a real incident.
+
+### It stops going dark when the API has a bad hour
+
+The API sits behind a WAF and has bad hours. A real one: from 00:33 to at
+least 02:31 every cycle re-authenticated successfully and then took HTTP 400
+on *both* the bill forecast and the interval export. By 15:05 the same
+requests worked untouched. Nothing about them had changed.
+
+Upstream raises `UpdateFailed` on the first failure, which takes every entity
+unavailable — and when it happens during setup, leaves the entry retrying. A
+user reload landing on an in-flight retry cancels it, and Home Assistant
+schedules no further retry after a cancellation. The observed result was
+twelve hours with the integration entirely gone.
+
+- A refused poll now falls back to the last good payload for 24 hours, which
+  is a full publication cycle: the API publishes exactly one new day per day,
+  so a payload under 24 hours old is as current as the source ever gets.
+- `ConfigEntryAuthFailed` still passes straight through, or the
+  "Reauthenticate" button would never appear. Two tests assert this — one on
+  the handler list, one by driving a real cycle.
+- **`Last successful update` is the sensor that tells the truth.** Since the
+  others keep reading through a failure, "the sensors have values" no longer
+  proves the API is answering. This one stops advancing the moment cycles
+  start failing, and diagnostics reports the consecutive failure count beside it.
+- A rejected login and an unreachable one are now different things. The
+  refresh token expires about once a day, so before this any WAN outage
+  spanning one cycle ended with the integration demanding credentials that
+  were never the problem.
+- API errors carry the response body into the log — squashed onto one line,
+  truncated, with account and meter numbers masked. `str(ApiError)` is
+  `"API error: 400"` and nothing more, which cannot distinguish an inverted
+  date window from an unentitled account from a WAF block page. The incident
+  above was undiagnosable for exactly that reason.
+
+### It notices when recorded history is wrong, and offers to fix it
+
+The Energy Dashboard reads a day's cost as the difference between two running
+totals. If a write is interrupted between chains — an unclean shutdown, a
+reload landing on a recovery cycle after an outage — a day can end up carrying
+a second copy of its own cost while **every hourly value stays individually
+correct**. Auditing the raw sums misses the entire fault class.
+
+This shipped once, and is what the work below exists to prevent: 2026-08-15
+recorded 90.25 kWh at $32.95 instead of $16.34 — 0.365 $/kWh against a
+sixty-day band of 0.174–0.185 — written when the API returned from an
+eight-hour outage and the integration was reloaded ninety seconds later.
+
+- Every statistic chain is now seeded from the window being rewritten, never
+  from its own last row, so an interrupted cycle cannot stack a day on top of
+  a sum that already contains it.
+- After each settled update the last 14 days of *day totals* are read back out
+  of the recorder and checked. A day whose implied $/kWh is off the window's
+  median by more than 1.5× in either direction raises a repair, cleared
+  automatically once it no longer does. A duplicated day measured 1.98× in the
+  real incident; sixty days of Schedule 1 on a real meter spanned a factor of
+  1.06, so the threshold clears both comfortably.
+- The repair says whose fault it is and that the bill is unaffected. A day at
+  twice the going rate looks exactly like a billing error, and the reasonable
+  response to a billing error is to phone the utility — about a number the
+  utility never produced, cannot see, and cannot explain.
+- `dominion_energy.rebuild_cost_statistics` recomputes recorded cost from the
+  meter's own interval data. Consumption is left alone. The alternative —
+  Developer Tools → Statistics, or a `recorder/adjust_sum_statistics`
+  WebSocket call — is well past what most people installing a HACS integration
+  will attempt.
+
+### More than one meter on an account
+
+Upstream keys the config entry on the account number and each entity's unique
+ID on `{account}_{sensor}`, so a second meter on the same account cannot be
+added and would write into the first one's statistics if it could. Entries are
+now keyed on `{account}_{meter}`, with a migration that leaves existing
+installations on the identity they already have — statistic IDs are how the
+Energy Dashboard finds history, and renaming one orphans it.
+
+### Entity and config-flow names that actually appear
+
+Home Assistant only loads `translations/<lang>.json` for custom integrations.
+Upstream ships a complete `strings.json` — seven config-flow steps, options,
+entity names — and no `translations/` directory, so none of it reaches the UI.
+This fork ships both, kept byte-identical, with a test that fails if a step,
+error, abort reason, service or repair issue loses its strings.
+
+### New capabilities
+
+- **Usage insights** derived from your own interval data — an always-on
+  baseline, the busiest hour of the day, and a binary sensor for a day that
+  was out of character for that weekday.
+- **Budget** — an optional spending target for the billing period, with an
+  on-pace warning that watches the *projection* rather than spend to date, so
+  it can warn on day 6 of 30 while there is still time to act.
+- **Solar / net metering** — a separate generation stream and statistic,
+  created only once the meter actually reports export.
+- **Green Button import**, extending Energy Dashboard history from the API's
+  ~68 day ceiling to roughly 13 months.
+- **A projected bill broken into its line items** — distribution, generation,
+  transmission, fuel, taxes and the customer charge — so you can see *why* a
+  bill moved when your usage did not.
+- **A rate staleness alarm.** Dominion re-files its riders periodically and
+  the tariff is hard-coded here; `Rate model drift` measures this integration's
+  Schedule 1 estimate against the last real bill, so bundled rates falling
+  behind announce themselves.
+- **Downloadable diagnostics**, with account number, meter number, service
+  address, credentials and tokens redacted — a test fails if any fake
+  credential appears anywhere in the output.
+- **Billing-period awareness throughout.** Dominion reads meters mid-month, so
+  tiered pricing and the monthly customer charge reset on that cycle rather
+  than on the 1st.
+
+### Findings, measured rather than assumed
+
+These are recorded in the code so the next person does not have to rediscover
+them:
+
+- **The overnight baseline was measuring the air conditioner.** The obvious
+  window — midnight to 05:00 — assumes the house is asleep and the HVAC is
+  off. On a real meter that cooled at night, midnight was the *second-heaviest*
+  hour of the day and the quietest was 10 AM; that window returned 1508 W,
+  near enough the household's whole average draw. The quiet hours are now
+  taken from the household's own 30-day profile.
+- **A cycling thermostat moves `hvac_action`, not its state.** `hvac_action`
+  is an attribute, so `state_changes_during_period()` skips those rows
+  entirely and an HVAC filter built on it silently does nothing. That shipped
+  once: against a real ecobee it excluded 10 intervals out of 70 and reported
+  the air conditioner as standing load.
+- **Green Button timestamps are wrong by a constant the file does not
+  disclose.** One August export measured +5 hours against the API, a February
+  one +4. The importer measures the offset by correlation rather than
+  modelling it — an earlier version reconstructed the intended wall clock and
+  re-localised with DST rules, which made two exports agree with each other at
+  100% while leaving both five hours from the truth.
+- **Mean absolute error cannot score that alignment.** Readings are whole kWh,
+  which leaves MAE nearly flat — 1.24 to 1.57 across shifts on real data,
+  picking the wrong answer — while correlation ranged 0.02 to 0.98 and was
+  unambiguous.
+- **Billing cycle length is mean-reverting, not persistent.** Borrowing the
+  last completed bill's length looks more principled than a nominal 30 days
+  but measures worse: across 21 consecutive cycles from one account, a 33-day
+  January was followed by a 28-day February, so carrying the previous length
+  forward nearly doubled the error.
+- **Household electricity is strongly weekly.** Comparing a Saturday against a
+  mostly-weekday window flags every Saturday, so the unusual-usage check
+  compares like weekdays and uses a median, which stops one already-exceptional
+  day raising the bar and hiding the next.
+
+### Testing
+
+651 tests across twelve files, up from 18 in one. They are plain stdlib pytest
+and deliberately avoid importing `homeassistant`, so the bulk of the logic —
+tariff maths, usage aggregation, DST handling, ESPI parsing, diagnostics
+redaction — is decidable without a Home Assistant checkout. A second CI job
+runs the same suite against a pinned Home Assistant release, and a third
+type-checks against the real client library.
 
 ## Features
 
@@ -53,10 +226,15 @@
 1. Open HACS in Home Assistant
 2. Click the three dots in the top right corner
 3. Select "Custom repositories"
-4. Add this repository URL and select "Integration" as the category
+4. Add `https://github.com/negative-video/ha-dominion-energy` and select "Integration" as the category
 5. Click "Add"
 6. Search for "Dominion Energy" and install it
 7. Restart Home Assistant
+
+> **Adding this fork over an existing upstream install?** Remove the upstream
+> custom repository first, or HACS will keep offering you its releases. Your
+> config entry, its options and your recorded statistics all survive the
+> swap — the domain and the statistic IDs are unchanged.
 
 ### Manual Installation
 
@@ -116,6 +294,10 @@ Under "Configure" → **Usage insights**:
 
 **Projected billing period cost** carries the bill's line items as attributes — `distribution_charge`, `generation_charge`, `transmission_charge`, `fuel_charge`, `taxes_and_fees` and `customer_charge` — so you can see *why* a bill moved when your usage did not. These are the sections Dominion prints, so each rider is folded into the charge it is recovered under rather than lumped into one opaque "riders" line. These are always priced with the full Schedule 1 tariff; `breakdown_matches_state` tells you whether they add up to the sensor's own value or sit alongside it (they only match in Schedule 1 cost mode).
 
+> **Note**: `Last bill charges` and `Last bill usage` report `unknown` until
+> your first bill closes. An account with no closed bill is deliberately kept
+> distinguishable from one whose last bill genuinely came to zero.
+
 ### Understanding your usage
 
 | Entity | Description |
@@ -151,13 +333,24 @@ If your meter reports excess generation, three more sensors appear automatically
 | Sensor | Description |
 |--------|-------------|
 | Billing period start | First day of the current billing period |
-| Billing period end | Next meter read, ending the current billing period |
+| Billing period end | Estimated next meter read, ending the current billing period |
 | Time-of-use plan | `Yes`/`No` — whether the account is billed on a time-of-use plan |
 | Estimated last bill charges | What the Schedule 1 tariff model computes for the last bill ($) |
 | Rate model drift | How far that estimate lands from the real bill (%) |
 | Rate schedule effective date | Effective date of the newest tariff data bundled with this integration |
+| Last successful update | When a poll last actually reached the API |
 
-> **Note**: **Billing period end** is not always the raw API field. Dominion reports a period that is still running as ending *today*, so the value walks forward a day at a time and the period looks shorter than it is. Once that length passes the 20-day plausibility floor it stops looking obviously wrong, and the projection — usage-to-date ÷ days observed × days in period — collapses to exactly usage-to-date. An end that is not in the future is therefore replaced with the period start plus a nominal 30-day cycle. Borrowing the last completed bill's own length instead looks more principled but measures worse: across 21 consecutive cycles from one account, cycle length turned out to be mean-reverting rather than persistent (a 33-day January was followed by a 28-day February), so carrying the previous length forward nearly doubled the error.
+> **Note**: **Billing period end** is an estimate, and has to be. The API
+> publishes no next-scheduled-meter-read date anywhere — 46 leaf keys across
+> four `actionCode` values were probed and none carries one. The field that
+> looks like a period end is the day usage is published *through*: it advances
+> a day at a time and is never later than today, so the period always looks
+> shorter than it is. Once that length passes the 20-day plausibility floor it
+> stops looking obviously wrong, and the projection — usage-to-date ÷ days
+> observed × days in period — collapses to exactly usage-to-date. The period
+> start plus a nominal 30-day cycle is used instead. Borrowing the last
+> completed bill's own length measures worse; see
+> [Findings](#findings-measured-rather-than-assumed).
 
 > **Tip**: **Rate model drift** is a staleness alarm. Dominion re-files its riders periodically — the fuel factor typically changes around July 1 — and this integration ships the rates hard-coded. A drift figure that suddenly grows means the bundled tariff data has fallen behind and should be refreshed. See [docs/rate-schedules.md](docs/rate-schedules.md).
 
@@ -196,6 +389,7 @@ To add generation to the Energy Dashboard, use **Add solar production** rather t
 - Data is aggregated from 30-minute intervals into hourly statistics
 - Historical data is automatically backfilled on first setup. The window is set by `BACKFILL_DAYS` in `const.py`; the API returns roughly the last two months of 30-minute data regardless of the range requested
 - Days that are missing or only partly published are skipped rather than recorded as zeros, and are picked up once the data lands
+- Local hours that collapse to the same UTC instant on DST changeover days are merged rather than colliding
 - Cost is calculated using your configured cost mode (API estimate, fixed rate, time-of-use, or Schedule 1)
 - Statistics update daily with the previous day's data
 
@@ -273,6 +467,13 @@ If that fails (for example, Dominion asks for a new verification code):
 2. Click the notification to start the re-authentication flow
 3. Confirm or update your username/password and complete TFA again
 
+> **One re-login per day is the healthy pattern, not a fault.** The access
+> token lasts 30 minutes and the per-day cache skips whole cycles, so the
+> tokens usually go a full day untouched and the refresh token has expired by
+> the time the next real fetch comes round. A daily
+> `Refresh token expired, attempting auto-reauth` followed by
+> `Successfully re-authenticated` is the integration working correctly.
+
 ## Troubleshooting
 
 ### "Cannot connect to API"
@@ -309,6 +510,34 @@ Usage history is left untouched -- only the pricing built on top of it is recalc
 
 Download diagnostics before opening an issue: **Settings → Devices & Services → Dominion Energy → ⋮ → Download diagnostics**. Account number, meter number, service address, credentials and tokens are redacted, so the file is safe to attach to a public issue. It records the service region (for example `VA` or `SC`), which is usually the first thing needed to reproduce a fault.
 
+## Development
+
+```bash
+git clone https://github.com/negative-video/ha-dominion-energy
+cd ha-dominion-energy
+
+# The fast gate: the whole suite, no Home Assistant checkout needed
+uv sync --frozen --extra dev --python 3.13
+uv run --no-sync pytest tests/ -q
+
+# Against a pinned Home Assistant release
+uv sync --frozen --extra dev --extra test-ha --python 3.14
+uv run --no-sync pytest tests/ -q
+uv run --no-sync mypy custom_components/dominion_energy/ --ignore-missing-imports
+
+uvx ruff@0.16.2 check custom_components/dominion_energy/ tests/
+uvx ruff@0.16.2 format --check custom_components/dominion_energy/ tests/
+```
+
+`pytest-homeassistant-custom-component` pins one exact Home Assistant version
+and needs Python 3.14.2+, which is why it is an optional extra rather than a
+base dependency. Keep new tests importable without `homeassistant`.
+
+See [CLAUDE.md](CLAUDE.md) for the architecture and the reasoning behind the
+parts that look strange, and [RELEASING.md](RELEASING.md) for the release
+process — including why `dompower` is installed from a release URL with a
+version fragment rather than from PyPI.
+
 ## API Constants
 
 The Dominion Energy API uses SAP Customer Data Cloud (Gigya) for authentication. The following API key is the default for all users:
@@ -321,8 +550,9 @@ This is a public client identifier embedded in the Dominion Energy web app. It c
 
 ## Support
 
-- [Report Issues](https://github.com/YeomansIII/ha-dominion-energy/issues)
-- [dompower Library](https://github.com/YeomansIII/dompower) — this build installs the fork at [negative-video/dompower](https://github.com/negative-video/dompower)
+- [Report an issue](https://github.com/negative-video/ha-dominion-energy/issues) — for this fork
+- [negative-video/dompower](https://github.com/negative-video/dompower) — the client library this installs
+- [YeomansIII/ha-dominion-energy](https://github.com/YeomansIII/ha-dominion-energy) and [YeomansIII/dompower](https://github.com/YeomansIII/dompower) — the upstream projects this is built on
 
 ## License
 

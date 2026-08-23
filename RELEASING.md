@@ -59,10 +59,17 @@ Tagged releases avoid this: HACS fetches `archive/refs/tags/vX.Y.Z.zip`, which r
 
 ## Versioning
 
-Follow [semver](https://semver.org/):
-- **Patch** (1.3.x): Bug fixes, dependency bumps
-- **Minor** (1.x.0): New sensors, new features
-- **Major** (x.0.0): Breaking changes (config flow changes, removed sensors)
+Follow [semver](https://semver.org/), read at this repo's scale:
+- **Patch** (1.3.x): Bug fixes, hardening, dependency bumps, internal services
+  and repair flows. **This is the default** — reach for it unless one of the
+  cases below clearly applies.
+- **Minor** (1.x.0): A user-facing feature someone would choose to upgrade
+  *for*. Not a measure of how much changed.
+- **Major** (x.0.0): Breaking changes — config flow changes, removed sensors,
+  a renamed statistic ID, or a `dompower` release whose public surface moved
+  under us. 2.0.0 was cut for the last of those: `dompower` 0.4.0 renamed
+  `BillForecast.current_period_end` and made `last_bill` optional, which
+  changed a diagnostics key here and required matching fixes on both sides.
 
 ## Release Order
 

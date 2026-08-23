@@ -194,4 +194,5 @@ Lint and format run over `custom_components/` **and** `tests/`, with Ruff pinned
 
 - `hacs.json` holds HACS metadata, including the minimum Home Assistant version.
 - `manifest.json` carries the integration version and the `dompower` requirement URL.
-- This repo is a fork of `YeomansIII/ha-dominion-energy`; changes are intended to go back upstream, so keep the documentation/issue-tracker URLs and coding style as they are.
+- This repo is a fork of `YeomansIII/ha-dominion-energy`, whose most recent commit is from March 2026. The fork's own URLs are what `manifest.json`, `README.md` and the badges point at, so the release badge reads this fork's version and bug reports reach the code that has them. Keep the upstream coding style — a change written in it is still one an upstream maintainer could take.
+- The README's *What this fork adds* section carries numbers (commits ahead, test count, source size, sensor count). They were measured, not estimated. Re-measure before editing them rather than adjusting them by feel; `git rev-list --count upstream/main..main` against a clone of upstream is how the first one was taken.

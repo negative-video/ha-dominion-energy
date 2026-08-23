@@ -1328,7 +1328,7 @@ wheels = [
 
 [[package]]
 name = "ha-dominion-energy"
-version = "1.5.8"
+version = "2.0.0"
 source = { virtual = "." }
 
 [package.optional-dependencies]
