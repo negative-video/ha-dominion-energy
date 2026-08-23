@@ -17,4 +17,4 @@ repos:
           # The fork, not PyPI's `dompower`. Cloned rather than downloaded as a
           # release asset, matching pyproject.toml's [tool.uv.sources] and for
           # the same reason. Keep the tag in step with manifest.json's URL.
-          - git+https://github.com/negative-video/dompower@v0.3.0
+          - git+https://github.com/negative-video/dompower@v0.4.0

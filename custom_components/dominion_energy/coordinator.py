@@ -517,11 +517,11 @@ class DominionEnergyData:
     # mode that can say where the money goes. See `_projected_bill()`.
     projected_bill: PeriodBill | None = None
 
-    # The end of the current billing period after `billing_period_end()` has
-    # repaired a value that tracks today rather than naming the next meter
-    # read. The sensor shows this rather than the raw forecast field so it
-    # cannot contradict the projection, which is extrapolated over exactly
-    # this period. None when there is no forecast to anchor it.
+    # The end of the current billing period, estimated by `billing_period_end()`
+    # because the API publishes no next-read date to read it from. The sensor
+    # shows this rather than `usage_through_date` so it cannot contradict the
+    # projection, which is extrapolated over exactly this period. None when
+    # there is no forecast to anchor it.
     period_end_date: date | None = None
 
     # Our Schedule 1 estimate of the last completed bill against what Dominion
@@ -1014,7 +1014,7 @@ class DominionEnergyCoordinator(DataUpdateCoordinator[DominionEnergyData]):
             period_end_date = (
                 billing_period_end(
                     bill_forecast.current_period_start,
-                    bill_forecast.current_period_end,
+                    bill_forecast.usage_through_date,
                     DEFAULT_BILLING_PERIOD_DAYS,
                     dt_util.now().date(),
                 )
@@ -1160,7 +1160,7 @@ class DominionEnergyCoordinator(DataUpdateCoordinator[DominionEnergyData]):
             return billing_period_days(None, None)
         return billing_period_days(
             bill_forecast.current_period_start,
-            bill_forecast.current_period_end,
+            bill_forecast.usage_through_date,
             DEFAULT_BILLING_PERIOD_DAYS,
             today,
         )
@@ -1392,7 +1392,7 @@ class DominionEnergyCoordinator(DataUpdateCoordinator[DominionEnergyData]):
             period_start,
             billing_period_end(
                 period_start,
-                bill_forecast.current_period_end,
+                bill_forecast.usage_through_date,
                 DEFAULT_BILLING_PERIOD_DAYS,
                 today,
             ),

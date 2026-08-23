@@ -252,7 +252,7 @@ class _Forecast:
     """The two fields `_projected_bill` reads off a ``BillForecast``."""
 
     current_period_start: date
-    current_period_end: date
+    usage_through_date: date
 
 
 def make_day(

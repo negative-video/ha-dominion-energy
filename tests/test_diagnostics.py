@@ -6,6 +6,7 @@ treat any leak of a sentinel credential as a hard failure.
 
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import UTC, date, datetime, timedelta
 import importlib.util
 import json
@@ -314,6 +315,20 @@ class TestDiagnosticUsefulness:
         assert forecast["is_tou"] is False
         assert forecast["last_bill"]["usage"] == 1000.0
         assert forecast["current_period_start"] == "2026-08-01"
+        # Named for what the field holds -- the day usage is published
+        # through -- not for a period end the API never reports.
+        assert forecast["usage_through_date"] == "2026-08-21"
+        assert "current_period_end" not in forecast
+
+    def test_forecast_without_a_last_bill_summarises(
+        self, fake_entry_data, fake_entry_options, fake_bill_forecast
+    ):
+        """An account with no closed bill yet must still produce a dump."""
+        forecast = replace(fake_bill_forecast, last_bill=None)
+        data = FakeCoordinatorData(bill_forecast=forecast)
+        result = _build(fake_entry_data, fake_entry_options, FakeCoordinator(data=data))
+        assert result["bill_forecast"]["last_bill"] is None
+        assert result["bill_forecast"]["derived_rate"] is None
 
     def test_coordinator_state_is_reported(
         self, fake_entry_data, fake_entry_options, fake_coordinator
@@ -403,7 +418,7 @@ class TestDegradedStates:
 
         class ExplodingForecast:
             current_period_start = date(2026, 8, 1)
-            current_period_end = date(2026, 8, 31)
+            usage_through_date = date(2026, 8, 21)
             current_usage_kwh = 1.0
             is_tou = False
             last_bill = None

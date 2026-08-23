@@ -386,3 +386,39 @@ class TestGenerationGating:
     def test_generation_entities_are_added_only_once(self) -> None:
         source = ast.unparse(_function("async_setup_entry"))
         assert "generation_added" in source
+
+
+class TestOptionalLastBill:
+    """``BillForecast.last_bill`` is None until an account has a closed bill.
+
+    A new account, or one whose first cycle has not been read yet, gets a
+    forecast with no ``last_bill``. Guarding only the forecast and then
+    reaching through to ``.charges`` raises ``AttributeError`` inside
+    ``native_value``, which takes down every sensor on the platform rather
+    than just the two that have nothing to show.
+    """
+
+    def _value_fn_source(self, key: str) -> str:
+        call = next(
+            call
+            for call in _tuple_of_descriptions("SENSORS")
+            if _describe(call)["key"] == key
+        )
+        value_fn = next(kw.value for kw in call.keywords if kw.arg == "value_fn")
+        return ast.unparse(value_fn)
+
+    @pytest.mark.parametrize("key", ["last_bill_charges", "last_bill_usage"])
+    def test_last_bill_is_read_through_the_guard(self, key: str) -> None:
+        source = self._value_fn_source(key)
+        assert "_last_bill(data)" in source, (
+            f"{key} must read the last bill through _last_bill(), which checks "
+            "both the forecast and the optional last_bill"
+        )
+        assert "data.bill_forecast.last_bill" not in source, (
+            f"{key} reaches through last_bill without checking it for None"
+        )
+
+    def test_guard_checks_both_levels(self) -> None:
+        source = ast.unparse(_function("_last_bill"))
+        assert "data.bill_forecast is None" in source
+        assert "return data.bill_forecast.last_bill" in source

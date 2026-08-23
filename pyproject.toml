@@ -1,6 +1,6 @@
 [project]
 name = "ha-dominion-energy"
-version = "1.5.6"
+version = "1.5.8"
 description = "Home Assistant custom integration for Dominion Energy"
 requires-python = ">=3.12"
 dependencies = []
@@ -51,7 +51,7 @@ typing = [
 # tag is what keeps this honest: it names the same release the manifest
 # installs, and uv.lock pins the commit it resolved to.
 [tool.uv.sources]
-dompower = { git = "https://github.com/negative-video/dompower", tag = "v0.3.0" }
+dompower = { git = "https://github.com/negative-video/dompower", tag = "v0.4.0" }
 
 [tool.ruff]
 target-version = "py312"

@@ -7,6 +7,8 @@ from dataclasses import dataclass
 from datetime import date, datetime
 from typing import Any
 
+from dompower import BillPeriodData
+
 from homeassistant.components.sensor import (
     SensorDeviceClass,
     SensorEntity,
@@ -43,6 +45,21 @@ class DominionEnergySensorDescription(SensorEntityDescription):  # type: ignore[
     """Describes a Dominion Energy sensor."""
 
     value_fn: Callable[[DominionEnergyData], float | str | date | datetime | None]
+
+
+def _last_bill(data: DominionEnergyData) -> BillPeriodData | None:
+    """Return the last closed billing period, or None if there is not one yet.
+
+    Both halves of that have to be checked. The forecast itself is absent when
+    a refresh could not reach the API, and `BillForecast.last_bill` is
+    separately optional: an account with no closed bill yet is left as None
+    rather than filled in with a zero-valued period, so that it stays
+    distinguishable from an account whose last bill genuinely came to zero.
+    Reaching through either one raises and takes the whole platform down.
+    """
+    if data.bill_forecast is None:
+        return None
+    return data.bill_forecast.last_bill
 
 
 SENSORS: tuple[DominionEnergySensorDescription, ...] = (
@@ -102,7 +119,7 @@ SENSORS: tuple[DominionEnergySensorDescription, ...] = (
         state_class=SensorStateClass.TOTAL,
         suggested_display_precision=2,
         value_fn=lambda data: (
-            data.bill_forecast.last_bill.charges if data.bill_forecast else None
+            bill.charges if (bill := _last_bill(data)) is not None else None
         ),
     ),
     DominionEnergySensorDescription(
@@ -113,7 +130,7 @@ SENSORS: tuple[DominionEnergySensorDescription, ...] = (
         state_class=SensorStateClass.TOTAL,
         suggested_display_precision=1,
         value_fn=lambda data: (
-            data.bill_forecast.last_bill.usage if data.bill_forecast else None
+            bill.usage if (bill := _last_bill(data)) is not None else None
         ),
     ),
     DominionEnergySensorDescription(

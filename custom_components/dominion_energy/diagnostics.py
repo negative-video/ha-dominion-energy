@@ -196,7 +196,12 @@ def summarize_bill_forecast(forecast: Any) -> dict[str, Any] | None:
         "current_period_start": _as_iso(
             getattr(forecast, "current_period_start", None)
         ),
-        "current_period_end": _as_iso(getattr(forecast, "current_period_end", None)),
+        # Renamed alongside the field: the key used to read
+        # "current_period_end", which is what `dompower` called a value that is
+        # really the day usage is published through. A diagnostics key naming
+        # a period bound that the API does not publish sends whoever reads the
+        # dump looking for a bug in the wrong place.
+        "usage_through_date": _as_iso(getattr(forecast, "usage_through_date", None)),
         "current_usage_kwh": getattr(forecast, "current_usage_kwh", None),
         "is_tou": getattr(forecast, "is_tou", None),
         "derived_rate": derived_rate,

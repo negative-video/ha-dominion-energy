@@ -1032,8 +1032,8 @@ wheels = [
 
 [[package]]
 name = "dompower"
-version = "0.3.0"
-source = { git = "https://github.com/negative-video/dompower?tag=v0.3.0#525d0421767269b2438b2b321d5b24b7e583b407" }
+version = "0.4.0"
+source = { git = "https://github.com/negative-video/dompower?tag=v0.4.0#e98f772981e9dc3bcf2d0acb17538914259b2039" }
 dependencies = [
     { name = "aiohttp" },
     { name = "openpyxl" },
@@ -1328,7 +1328,7 @@ wheels = [
 
 [[package]]
 name = "ha-dominion-energy"
-version = "1.5.5"
+version = "1.5.8"
 source = { virtual = "." }
 
 [package.optional-dependencies]
@@ -1347,7 +1347,7 @@ typing = [
 
 [package.metadata]
 requires-dist = [
-    { name = "dompower", marker = "extra == 'test-ha'", git = "https://github.com/negative-video/dompower?tag=v0.3.0" },
+    { name = "dompower", marker = "extra == 'test-ha'", git = "https://github.com/negative-video/dompower?tag=v0.4.0" },
     { name = "mypy", marker = "extra == 'typing'", specifier = ">=1.13.0" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.3.0" },
     { name = "pytest-asyncio", marker = "extra == 'dev'", specifier = ">=0.24.0" },

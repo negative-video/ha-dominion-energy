@@ -67,61 +67,68 @@ def shift_months(anchor: date, months: int) -> date:
 
 def period_end_is_trustworthy(
     period_start: date | None,
-    period_end: date | None,
+    reported_end: date | None,
     today: date | None = None,
 ) -> bool:
     """Whether a reported period end can be used as the next meter-read date.
 
-    Two independent ways the forecast's ``current_period_end`` lies about a
-    period that is still running, both of which have been observed live:
+    The forecast has no next-read date to offer. `dompower` 0.4 probed 46 leaf
+    keys across actionCodes 1, 3, 4 and 5 for one and found none, and renamed
+    the field that used to look like one -- ``current_period_end`` -- to
+    ``usage_through_date``, because that is what it is: the day
+    ``current_usage_kwh`` is measured *through*. It advances by a day every
+    day and is never later than today.
 
-    1. The API returns the date usage is published *through* rather than the
-       scheduled read, so the end tracks today and advances by a day every day.
-    2. The field is absent and `dompower` substitutes ``date.today()``
-       (``client._parse_bill_forecast``), which is indistinguishable from (1)
-       by the time it reaches us.
+    So what arrives here is a publication cursor wearing a period end's shape,
+    and the structural tell is the same either way: **the end of a period that
+    has not finished yet must be in the future.** Checking that is what the
+    length bounds alone cannot do -- a cursor stays inside 20-45 days of the
+    period start for most of the cycle, so the bounds wave it through from
+    day 20 onward.
 
-    Both collapse to the same structural tell: **the end of a period that has
-    not finished yet must be in the future.** Checking that is what the length
-    bounds alone cannot do -- a truncated end stays inside 20-45 days for most
-    of the cycle, so the bounds wave it through from day 20 onward.
+    The guard stays rather than being replaced by an unconditional "no", both
+    because a caller with no clock still gets the bounds check and because a
+    genuine end date reaching this function should be used rather than
+    discarded on the strength of what one API does today.
 
     ``today`` is optional so the pure length check remains available to callers
     that have no clock; without it only the bounds are applied.
     """
-    if period_start is None or period_end is None:
+    if period_start is None or reported_end is None:
         return False
-    if today is not None and period_end <= today:
+    if today is not None and reported_end <= today:
         return False
     return (
         MIN_BILLING_PERIOD_DAYS
-        <= (period_end - period_start).days
+        <= (reported_end - period_start).days
         <= (MAX_BILLING_PERIOD_DAYS)
     )
 
 
 def billing_period_days(
     period_start: date | None,
-    period_end: date | None,
+    reported_end: date | None,
     default: int = DEFAULT_BILLING_PERIOD_DAYS,
     today: date | None = None,
 ) -> int:
     """Return the number of days covered by a billing period.
 
-    Dominion reports the period as meter-read to meter-read dates, so the number
-    of billed days is ``end - start``. A missing, implausible or not-yet-elapsed
-    period falls back to ``default`` -- see `period_end_is_trustworthy()` for
-    why the last of those matters and why the caller should pass ``today``.
+    A billing period runs meter-read to meter-read, so its length is
+    ``end - start``. A missing, implausible or not-yet-elapsed end falls back
+    to ``default`` -- see `period_end_is_trustworthy()` for why the last of
+    those matters and why the caller should pass ``today``. On the live path
+    the fallback is what runs: the caller has ``usage_through_date``, which is
+    never in the future, so ``default`` is the estimate every real cycle uses.
     """
-    if not period_end_is_trustworthy(period_start, period_end, today):
+    if not period_end_is_trustworthy(period_start, reported_end, today):
         return default
-    return (period_end - period_start).days  # type: ignore[operator]
+    return (reported_end - period_start).days  # type: ignore[operator]
 
 
 @overload
 def billing_period_end(
     period_start: date,
-    period_end: date | None,
+    reported_end: date | None,
     default: int = ...,
     today: date | None = ...,
 ) -> date: ...
@@ -130,7 +137,7 @@ def billing_period_end(
 @overload
 def billing_period_end(
     period_start: None,
-    period_end: date | None,
+    reported_end: date | None,
     default: int = ...,
     today: date | None = ...,
 ) -> date | None: ...
@@ -138,7 +145,7 @@ def billing_period_end(
 
 def billing_period_end(
     period_start: date | None,
-    period_end: date | None,
+    reported_end: date | None,
     default: int = DEFAULT_BILLING_PERIOD_DAYS,
     today: date | None = None,
 ) -> date | None:
@@ -147,13 +154,15 @@ def billing_period_end(
     Overloaded because the only way out with no end date is having no start
     date either: given a real ``period_start`` a real end always comes back,
     so a caller that has already established its start should not have to
-    assert the result again. `BillForecast`'s own bounds are ``date | None``
-    from `dompower` 0.3 onwards -- the library stopped substituting today's
-    date for a bound the API omitted -- so that establishing step is now the
-    caller's job rather than something the type hands them for free.
+    assert the result again. `BillForecast`'s own bounds are ``date | None``,
+    so that establishing step is the caller's job rather than something the
+    type hands them for free.
 
     An untrustworthy end is replaced by the start plus ``default`` days, so the
-    period keeps a full cycle's length instead of stopping at today.
+    period keeps a full cycle's length instead of stopping at today. Callers on
+    the update path pass ``usage_through_date``, which never survives the
+    trustworthiness check, so in practice this returns the estimate -- see
+    `period_end_is_trustworthy()` for why the API has nothing better to give.
 
     Two things read this. The projection divides period-to-date usage by the
     days observed and multiplies by the period length; when the end tracks
@@ -168,9 +177,9 @@ def billing_period_end(
     2,000 kWh bill, for a date bug.
     """
     if period_start is None:
-        return period_end
+        return reported_end
     return period_start + timedelta(
-        days=billing_period_days(period_start, period_end, default, today)
+        days=billing_period_days(period_start, reported_end, default, today)
     )
 
 

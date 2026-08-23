@@ -72,18 +72,24 @@ class FakeBillPeriod:
 
 @dataclass
 class FakeBillForecast:
-    """Stand-in for ``dompower.BillForecast``."""
+    """Stand-in for ``dompower.BillForecast``.
 
-    last_bill: FakeBillPeriod
+    ``last_bill`` is optional and ``usage_through_date`` is named as the real
+    dataclass names it, because a fake that is easier to reach through than the
+    thing it stands in for lets a `None` dereference pass the suite and crash
+    a live install.
+    """
+
+    last_bill: FakeBillPeriod | None
     current_period_start: date
-    current_period_end: date
+    usage_through_date: date
     current_usage_kwh: float
     is_tou: bool = False
 
     @property
     def derived_rate(self) -> float | None:
         """Mirror ``BillForecast.derived_rate``."""
-        if self.last_bill.usage > 0:
+        if self.last_bill is not None and self.last_bill.usage > 0:
             return self.last_bill.charges / self.last_bill.usage
         return None
 
@@ -189,7 +195,7 @@ def fake_bill_forecast() -> FakeBillForecast:
             period_end=date(2026, 7, 31),
         ),
         current_period_start=date(2026, 8, 1),
-        current_period_end=date(2026, 8, 31),
+        usage_through_date=date(2026, 8, 21),
         current_usage_kwh=480.0,
         is_tou=False,
     )
