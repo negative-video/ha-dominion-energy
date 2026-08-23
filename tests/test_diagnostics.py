@@ -679,3 +679,29 @@ class TestSummarizeDailyTotals:
         assert payload["statistics"]["daily"] == [
             {"day": "2026-08-15", "kwh": 90.254, "cost": 16.34, "rate": 0.1810}
         ]
+
+
+class TestHomeAssistantVersionIsReported:
+    """The HA version is the first thing anyone reading a dump needs.
+
+    ``hass.config`` has no ``version`` attribute -- only ``Config.as_dict()``
+    emits a ``"version"`` key, built from ``homeassistant.const.__version__``.
+    A ``getattr(hass.config, "version", None)`` therefore always returned None,
+    and the default hid it: every dump reported no Home Assistant version,
+    confirmed against a live 2026.8.1 instance.
+    """
+
+    def test_version_comes_from_the_const_not_hass_config(self) -> None:
+        source = (COMPONENT_DIR / "diagnostics.py").read_text(encoding="utf-8")
+        assert 'getattr(hass.config, "version"' not in source, (
+            "hass.config has no version attribute; the getattr default makes "
+            "that failure silent"
+        )
+        assert "from homeassistant.const import __version__" in source
+        assert "ha_version=HA_VERSION," in source
+
+    def test_a_supplied_version_reaches_the_payload(
+        self, fake_entry_data, fake_entry_options
+    ):
+        payload = _build({}, {}, None, ha_version="2026.8.1")
+        assert payload["versions"]["home_assistant"] == "2026.8.1"

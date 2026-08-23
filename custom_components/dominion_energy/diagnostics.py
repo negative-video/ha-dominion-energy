@@ -15,6 +15,7 @@ import re
 from typing import TYPE_CHECKING, Any
 
 from homeassistant.components.diagnostics import async_redact_data
+from homeassistant.const import __version__ as HA_VERSION
 
 from .const import (
     CONF_ACCESS_TOKEN,
@@ -424,7 +425,12 @@ async def async_get_config_entry_diagnostics(
         consecutive_failures=getattr(coordinator, "consecutive_failures", None),
         has_statistics=has_statistics,
         daily_totals=daily_totals,
-        ha_version=getattr(hass.config, "version", None),
+        # `homeassistant.const.__version__`, not `hass.config.version` --
+        # `Config` has no such attribute. Only `Config.as_dict()` carries a
+        # "version" key, so the getattr default silently reported every
+        # support dump as having no Home Assistant version at all, which is
+        # the first thing anyone reading one needs.
+        ha_version=HA_VERSION,
         dompower_version=dompower_version,
     )
 
