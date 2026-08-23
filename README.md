@@ -35,7 +35,7 @@
 from 2,469 lines to 7,534 and a test suite that grew from 18 tests in one file
 to 651 across twelve. Upstream's most recent commit is from March 2026.
 
-Everything below is a change in behaviour, not a refactor. Where a number
+Everything below is a change in behavior, not a refactor. Where a number
 appears it was measured against a real meter or a real incident.
 
 ### It stops going dark when the API has a bad hour
@@ -165,8 +165,8 @@ them:
 - **Green Button timestamps are wrong by a constant the file does not
   disclose.** One August export measured +5 hours against the API, a February
   one +4. The importer measures the offset by correlation rather than
-  modelling it — an earlier version reconstructed the intended wall clock and
-  re-localised with DST rules, which made two exports agree with each other at
+  modeling it — an earlier version reconstructed the intended wall clock and
+  re-localized with DST rules, which made two exports agree with each other at
   100% while leaving both five hours from the truth.
 - **Mean absolute error cannot score that alignment.** Readings are whole kWh,
   which leaves MAE nearly flat — 1.24 to 1.57 across shifts on real data,
@@ -186,7 +186,7 @@ them:
 
 651 tests across twelve files, up from 18 in one. They are plain stdlib pytest
 and deliberately avoid importing `homeassistant`, so the bulk of the logic —
-tariff maths, usage aggregation, DST handling, ESPI parsing, diagnostics
+tariff math, usage aggregation, DST handling, ESPI parsing, diagnostics
 redaction — is decidable without a Home Assistant checkout. A second CI job
 runs the same suite against a pinned Home Assistant release, and a third
 type-checks against the real client library.
@@ -326,7 +326,7 @@ Set a billing period budget under "Configure" → "Usage insights" and three mor
 
 If your meter reports excess generation, three more sensors appear automatically — **Latest interval generation**, **Yesterday's generation**, and **Current month generation** — along with a generation statistic for the Energy Dashboard. Meters that never report export get none of these, so non-solar installations are unaffected.
 
-> **Note**: Generation is recorded as its own separate stream. It does **not** currently offset the cost figures — net-metering credits are not modelled.
+> **Note**: Generation is recorded as its own separate stream. It does **not** currently offset the cost figures — net-metering credits are not modeled.
 
 ### Diagnostic sensors
 

@@ -320,7 +320,7 @@ class TestDiagnosticUsefulness:
         assert forecast["usage_through_date"] == "2026-08-21"
         assert "current_period_end" not in forecast
 
-    def test_forecast_without_a_last_bill_summarises(
+    def test_forecast_without_a_last_bill_summarizes(
         self, fake_entry_data, fake_entry_options, fake_bill_forecast
     ):
         """An account with no closed bill yet must still produce a dump."""
