@@ -1164,7 +1164,7 @@ class TestUpdateCycleOutcomes:
         """Day-old data must not hide the "Reauthenticate" button.
 
         The structural counterpart of this lives in
-        `TestAuthFailuresAreNotAbsorbed`; this one proves the behaviour, and
+        `TestAuthFailuresAreNotAbsorbed`; this one proves the behavior, and
         additionally that an auth failure is not miscounted as one of the
         transient failures the grace window is for.
         """
@@ -1236,7 +1236,7 @@ class TestInvertedStatisticsWindow:
     ``start_date = last_good_date + 1 day``; when the last fully-populated day
     *is* ``data_date``, that lands one day past the end of the window. Dominion
     answers an inverted range with HTTP 400, so the cycle warned every hour
-    instead of recognising it was already up to date.
+    instead of recognizing it was already up to date.
     """
 
     def test_heal_branch_landing_past_data_date_is_not_fetched(self) -> None:

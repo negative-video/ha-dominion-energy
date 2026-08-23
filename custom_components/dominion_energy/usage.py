@@ -3,7 +3,7 @@
 This module deliberately contains no Home Assistant imports so the logic can be
 unit tested without a Home Assistant installation. Every timestamp handled here
 is timezone aware (the dompower client always returns America/New_York aware
-datetimes), so ``astimezone(UTC)`` is enough to normalise them.
+datetimes), so ``astimezone(UTC)`` is enough to normalize them.
 """
 
 from __future__ import annotations

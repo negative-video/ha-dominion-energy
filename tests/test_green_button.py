@@ -1,6 +1,6 @@
 """Tests for Green Button (ESPI) parsing and timestamp realignment.
 
-The interesting behaviour under test is not parsing but *calibration*.
+The interesting behavior under test is not parsing but *calibration*.
 Dominion's exports carry a constant timestamp offset that cannot be derived
 from the file -- a real August export measured +5 hours against the utility's
 own API readings, and a February one +4. An earlier version of this module
@@ -60,7 +60,7 @@ def build_export(
 
     ``readings`` are (local wall-clock, whole kWh). Each is converted to an
     epoch using a *single* fixed offset for the whole file -- reproducing the
-    defect rather than the correct behaviour, which is the entire point.
+    defect rather than the correct behavior, which is the entire point.
     """
     entries = []
     for wall, kwh in readings:

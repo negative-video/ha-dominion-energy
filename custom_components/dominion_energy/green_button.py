@@ -12,13 +12,13 @@ Two properties of Dominion's export shape everything here:
 from the file.** Measured against the utility's own 30-minute API readings, an
 August export needed +5 hours -- the *standard* time offset, applied to a
 daylight-time reading. Dominion appears to convert each reading to Eastern
-Standard Time year-round and serialise that as an epoch labelled UTC. The
+Standard Time year-round and serialize that as an epoch labeled UTC. The
 offset is constant within a file (a uniform one-hour shift matched two
 different exports at 99.5% across a DST boundary), but differs between files
 depending on when the export was taken.
 
-So the correction is not derivable from the file, and modelling it is a trap:
-an earlier attempt to reconstruct the intended wall clock and re-localise it
+So the correction is not derivable from the file, and modeling it is a trap:
+an earlier attempt to reconstruct the intended wall clock and re-localize it
 with real DST rules made two exports agree with each other perfectly while
 leaving both five hours from the truth. Agreement between exports proves
 nothing. :func:`best_alignment` therefore *measures* the offset against data
@@ -325,7 +325,7 @@ def apply_shift(
     """Shift every reading by a whole number of hours.
 
     The correction is uniform: Dominion's offset is constant within an export,
-    so re-localising per reading would introduce a DST-shaped error that is not
+    so re-localizing per reading would introduce a DST-shaped error that is not
     actually there.
     """
     delta = timedelta(hours=hours)
@@ -485,8 +485,8 @@ def describe_path_problem(path: str, allowed_dirs: Iterable[str]) -> str:
             "either; see below."
         )
 
-    normalised = path.replace("/homeassistant/", "/config/", 1)
-    if normalised.startswith("/config/media/"):
+    normalized = path.replace("/homeassistant/", "/config/", 1)
+    if normalized.startswith("/config/media/"):
         lines.append(
             "Careful: /config/media and /media are different directories. Only "
             "the top-level /media is on the allowlist -- it is its own mount, a "

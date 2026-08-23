@@ -136,7 +136,7 @@ type DominionEnergyConfigEntry = ConfigEntry[DominionEnergyCoordinator]
 # The API publishes exactly one new day per day, so a payload less than 24
 # hours old is as current as the source ever gets. Blanking every entity the
 # first time an hourly poll fails throws away nothing but availability: the
-# numbers are still the same true numbers for the day they are labelled with,
+# numbers are still the same true numbers for the day they are labeled with,
 # and `data_date` says which day that is. Past the window the data really is
 # behind and going unavailable is the honest answer.
 STALE_DATA_GRACE = timedelta(hours=24)
@@ -425,7 +425,7 @@ def project_period_usage(
     `days_with_data` counts days that actually appear in the data rather than
     calendar days since the period started. A day the API has not published
     would otherwise be treated as a zero-usage day and drag the projection
-    down; assuming an unpublished day looked like its neighbours is the less
+    down; assuming an unpublished day looked like its neighbors is the less
     wrong of the two.
 
     The result never falls below `period_to_date_kwh`: energy already consumed
@@ -445,7 +445,7 @@ def rate_check(
     period_start: date | None,
     period_end: date | None,
 ) -> tuple[float | None, float | None, float | None]:
-    """Compare our Schedule 1 maths against a bill Dominion actually issued.
+    """Compare our Schedule 1 math against a bill Dominion actually issued.
 
     `rates.py` encodes a tariff that goes stale whenever the SCC approves a
     filing we have not transcribed yet - which has happened, unnoticed, for
@@ -1264,7 +1264,7 @@ class DominionEnergyCoordinator(DataUpdateCoordinator[DominionEnergyData]):
 
         Returns an empty list when no climate entities are configured, which
         leaves the baseline unfiltered -- correct for a household whose heating
-        and cooling never runs during its quiet hours, and clearly labelled on
+        and cooling never runs during its quiet hours, and clearly labeled on
         the sensor for one whose does.
 
         **This must read every recorded row, not just state changes.**
@@ -1427,7 +1427,7 @@ class DominionEnergyCoordinator(DataUpdateCoordinator[DominionEnergyData]):
     def _rate_check(
         bill_forecast: BillForecast | None,
     ) -> tuple[float | None, float | None, float | None]:
-        """Check our Schedule 1 maths against the last bill Dominion issued."""
+        """Check our Schedule 1 math against the last bill Dominion issued."""
         if bill_forecast is None or bill_forecast.last_bill is None:
             return None, None, None
 
@@ -1775,7 +1775,7 @@ class DominionEnergyCoordinator(DataUpdateCoordinator[DominionEnergyData]):
         )
 
     async def _async_audit_cost_statistics(self) -> None:
-        """Raise a repair when a recorded day is priced unlike its neighbours.
+        """Raise a repair when a recorded day is priced unlike its neighbors.
 
         This exists because of who reads the Energy Dashboard. A day at twice
         the going rate looks exactly like a billing error, and the reasonable
@@ -2553,7 +2553,7 @@ class DominionEnergyCoordinator(DataUpdateCoordinator[DominionEnergyData]):
         Dominion stamps every reading in an export with whichever UTC offset
         was in effect when the file was generated, so about half of any export
         is an hour out. `green_button.realign_to_local` reconstructs the
-        intended wall-clock time and re-localises it properly; the result is
+        intended wall-clock time and re-localizes it properly; the result is
         then checked against the API's own readings for the window the two
         share, and the import is refused if they do not line up. Writing
         history that is silently an hour skewed would be worse than not
@@ -2606,7 +2606,7 @@ class DominionEnergyCoordinator(DataUpdateCoordinator[DominionEnergyData]):
             )
 
         # Each export carries a constant but unknowable timestamp offset, so it
-        # is measured rather than modelled. A file that does not reach the API
+        # is measured rather than modeled. A file that does not reach the API
         # window is calibrated against an already-calibrated export instead --
         # two exports overlap heavily, so the chain holds.
         imported: dict[datetime, float] = {}

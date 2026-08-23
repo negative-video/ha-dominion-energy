@@ -34,7 +34,7 @@ MIN_PROFILE_DAYS = 7
 def hour_label(hour: int) -> str:
     """Render an hour of the day the way a person would say it.
 
-    ``18`` becomes ``"6 PM"``. Deliberately not localised: this integration
+    ``18`` becomes ``"6 PM"``. Deliberately not localized: this integration
     ships English strings only, and an hour rendered as ``18`` on a dashboard
     card is no use to the people these sensors are for.
     """
@@ -241,21 +241,21 @@ def hvac_active_windows(
 def _is_running(state: str | None, action: str | None) -> bool:
     """Whether a climate entity was drawing power in this state."""
     if action is not None:
-        normalised = action.lower()
-        if normalised in HVAC_RUNNING_ACTIONS:
+        normalized = action.lower()
+        if normalized in HVAC_RUNNING_ACTIONS:
             return True
-        if normalised in HVAC_QUIET_ACTIONS:
+        if normalized in HVAC_QUIET_ACTIONS:
             return False
         # An action this version has not heard of. Treat it as running: a new
         # HVAC mode is far more likely to draw power than not.
-        return normalised not in UNKNOWN_STATES
+        return normalized not in UNKNOWN_STATES
 
     if state is None:
         return False
-    normalised = state.lower()
-    if normalised in UNKNOWN_STATES:
+    normalized = state.lower()
+    if normalized in UNKNOWN_STATES:
         return False
-    return normalised != "off"
+    return normalized != "off"
 
 
 def quietest_hours(

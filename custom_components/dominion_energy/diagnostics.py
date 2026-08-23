@@ -39,7 +39,7 @@ if TYPE_CHECKING:
 # CONF_COOKIES holds Gigya session cookies, which are bearer credentials just
 # like the tokens. The account/meter numbers and the service address are not
 # secrets in the credential sense, but they identify the customer and their
-# home, so they are redacted too and summarised structurally instead.
+# home, so they are redacted too and summarized structurally instead.
 TO_REDACT: set[str] = {
     CONF_ACCESS_TOKEN,
     CONF_ACCOUNT_NUMBER,
@@ -67,7 +67,7 @@ TO_REDACT: set[str] = {
 }
 
 # Dominion Energy's electric service territories. Which one a customer is in
-# materially changes API behaviour (see upstream issue #19, where South
+# materially changes API behavior (see upstream issue #19, where South
 # Carolina accounts fail to authenticate), so the region is worth surfacing
 # even though the rest of the address is not.
 _SERVICE_REGIONS: tuple[str, ...] = (
@@ -83,7 +83,7 @@ _SERVICE_REGIONS: tuple[str, ...] = (
 
 
 def describe_identifier(value: Any) -> str | None:
-    """Summarise an identifier's shape without revealing the identifier.
+    """Summarize an identifier's shape without revealing the identifier.
 
     Account and meter numbers differ in length and formatting between service
     territories, which is frequently the root cause of an API rejection. This
@@ -147,7 +147,7 @@ def _dompower_version() -> str:
 
 
 def summarize_intervals(intervals: Any) -> dict[str, Any]:
-    """Summarise interval usage without emitting the raw consumption series.
+    """Summarize interval usage without emitting the raw consumption series.
 
     Half-hourly consumption is a behavioural fingerprint of the household, so
     only aggregates are reported. Counts, coverage and the generation flag are
@@ -182,7 +182,7 @@ def summarize_intervals(intervals: Any) -> dict[str, Any]:
 
 
 def summarize_bill_forecast(forecast: Any) -> dict[str, Any] | None:
-    """Summarise the bill forecast used to derive the API-estimate rate."""
+    """Summarize the bill forecast used to derive the API-estimate rate."""
     if forecast is None:
         return None
 
@@ -262,7 +262,7 @@ def build_diagnostics(
     """Assemble the redacted diagnostics payload.
 
     Split out from :func:`async_get_config_entry_diagnostics` so the redaction
-    behaviour can be exercised directly, without standing up Home Assistant.
+    behavior can be exercised directly, without standing up Home Assistant.
     """
     entry_data = dict(entry_data or {})
     entry_options = dict(entry_options or {})
@@ -358,7 +358,7 @@ def build_diagnostics(
             # What the Energy Dashboard actually draws, day by day, with the
             # rate each day works out at. A chain seeded from the wrong row
             # leaves every hourly value correct and shows up only here, as one
-            # day priced unlike its neighbours -- so a diagnostics dump that
+            # day priced unlike its neighbors -- so a diagnostics dump that
             # omitted this could not distinguish it from a real tariff.
             "daily": summarize_daily_totals(daily_totals),
         },

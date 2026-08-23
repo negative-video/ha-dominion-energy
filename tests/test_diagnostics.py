@@ -136,7 +136,7 @@ class TestRedaction:
     def test_no_sentinel_survives_anywhere_in_the_dump(
         self, fake_entry_data, fake_entry_options, fake_coordinator
     ):
-        """No substring of any fake credential appears in the serialised dump.
+        """No substring of any fake credential appears in the serialized dump.
 
         This is the backstop assertion: it does not care how the payload is
         structured, only that the secrets are gone.
@@ -173,7 +173,7 @@ class TestRedaction:
     def test_unknown_sensitive_key_added_later_is_still_caught(
         self, fake_entry_data, fake_entry_options, fake_coordinator
     ):
-        """A key added to TO_REDACT is honoured across the whole payload."""
+        """A key added to TO_REDACT is honored across the whole payload."""
         data = {**fake_entry_data, "id_token": "zzz-leaked-id-token"}
         result = _build(data, fake_entry_options, fake_coordinator)
         assert "zzz-leaked-id-token" not in json.dumps(result, default=str)
@@ -537,7 +537,7 @@ async def test_async_get_config_entry_diagnostics_end_to_end(
     ``async_get_config_entry_diagnostics`` reads the entry defensively, so a
     stand-in entry is enough to prove the wiring without booting Home
     Assistant. The recorder lookup degrades to None, which is the documented
-    behaviour when statistics cannot be queried.
+    behavior when statistics cannot be queried.
     """
 
     class StubConfig:

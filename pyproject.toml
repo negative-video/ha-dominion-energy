@@ -6,7 +6,7 @@ requires-python = ">=3.12"
 dependencies = []
 
 [project.optional-dependencies]
-# Lightweight test dependencies. The bulk of the suite (rate maths, usage
+# Lightweight test dependencies. The bulk of the suite (rate math, usage
 # aggregation, translation coverage, diagnostics redaction helpers) is plain
 # pytest over the standard library and runs with just these installed.
 dev = [

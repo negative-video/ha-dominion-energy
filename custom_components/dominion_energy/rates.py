@@ -34,14 +34,14 @@ class RiderCategory(Enum):
     sections a customer actually sees, and every one of them is applied flat to
     total kWh. Summing them into a single bucket is arithmetically correct but
     reads as implausible -- on the current schedule the bucket is 10.0 c/kWh,
-    which looks like a modelling error until you notice it contains the fuel
+    which looks like a modeling error until you notice it contains the fuel
     factor (3.76 c/kWh, its own line on the bill) and Rider T1 (1.18 c/kWh,
     which the bill prints under Transmission).
 
     This is the bill's *display* grouping, which is not the same as the
     tariff's rate-basis split (whether a rider is stated per distribution kWh
     or per Electricity Supply kWh) -- see docs/rate-schedules.md. Only the
-    display grouping is modelled here, because that is what a breakdown is
+    display grouping is modeled here, because that is what a breakdown is
     read against.
     """
 
@@ -638,7 +638,7 @@ def calculate_schedule1_period_bill(
     Season is taken from the midpoint of the period, since the tariff prices a
     whole billing month at one season's rates rather than day by day. The
     customer charge is applied once; bimonthly bills (which the tariff handles
-    by doubling the charge and the tier boundaries) are not modelled.
+    by doubling the charge and the tier boundaries) are not modeled.
 
     Args:
         total_kwh: Total kWh for the billing period.

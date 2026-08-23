@@ -121,7 +121,7 @@ Notes and caveats:
   nothing here is mispriced — but do not treat worksheet dates as
   authoritative when deciding where a schedule boundary falls. Check the
   rider PDF header.
-- **Net metering is not modelled.** Rider T1 carries a $1.605/kW demand charge
+- **Net metering is not modeled.** Rider T1 carries a $1.605/kW demand charge
   that applies to Schedule 1 net-metering installations above 20 kW AC, which
   pay the greater of the T1 energy charge or the T1 demand charge. Schedule 1
   itself likewise adds distribution and transmission standby charges for those
@@ -136,7 +136,7 @@ Notes and caveats:
 - Riders are grouped two different ways, and they do not agree:
   - **By rate basis**, in the tariff: DIST, C1A and C4A are "cents per
     **Distribution** kWh charge"; A, GEN, CE, CERC, E, SNA, OSW, SMR and T1 are
-    "cents per **Electricity Supply** kWh charge". Not modelled — it only
+    "cents per **Electricity Supply** kWh charge". Not modeled — it only
     matters for a supply/delivery subtotal, which nothing needs yet.
   - **By bill section**, in the "Rate Worksheet" tab, which is the layout a
     customer actually sees: section A takes C1A/C2A/C4A/DIST/RBB, section B.2
@@ -151,7 +151,7 @@ Notes and caveats:
   It had not appeared in [3] or [4] as of 2026-08-11. When it lands it will
   show up as a new or re-rated rider in the worksheet.
 - The tariff prorates differently for bimonthly bills (doubling both the
-  customer charge and the 800 kWh tier boundaries). That is not modelled.
+  customer charge and the 800 kWh tier boundaries). That is not modeled.
 
 ## Adding a new dated schedule
 
@@ -197,7 +197,7 @@ When the SCC approves a change:
 | Quarterly | Diff the whole rider table in [4]. Riders are re-filed on their own schedules throughout the year (2026 saw changes in March, April, May, June, July and August). |
 | On a base rate case | Schedule 1 itself [1]. Rare, but changes the customer charge and the kWh charges. |
 
-## Staleness self-defence
+## Staleness self-defense
 
 `rates.py` exposes a few dependency-free signals so the rest of the integration
 can notice drift without anyone remembering to read this file:

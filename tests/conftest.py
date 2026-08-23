@@ -126,7 +126,7 @@ class FakeCoordinator:
 class FakeConfigEntry:
     """Stand-in for a Home Assistant ``ConfigEntry``.
 
-    Only the attributes the integration actually reads are modelled.
+    Only the attributes the integration actually reads are modeled.
     """
 
     data: dict[str, Any]

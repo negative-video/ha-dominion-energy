@@ -644,7 +644,7 @@ class TestCustomerChargeProration:
         assert charge_share < VA_SCHEDULE_1.customer_charge / 10
 
     def test_old_span_derived_billing_days_inflated_a_single_day(self):
-        """The previous behaviour (span of one day -> billing_days=1)."""
+        """The previous behavior (span of one day -> billing_days=1)."""
         day = date(2026, 7, 20)
         buggy = self._day_cost(day, 1, VA_SCHEDULE_1.customer_charge)
         fixed = self._day_cost(day, 30, VA_SCHEDULE_1.customer_charge)
